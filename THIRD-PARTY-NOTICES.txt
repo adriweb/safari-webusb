@@ -1,0 +1,16 @@
+Safari WebUSB
+Copyright (C) 2026 Adrien Bertrand
+Licensed under the GNU Lesser General Public License, version 2.1 or later.
+The complete license is included as LICENSE.
+
+This application statically links libusb, copyright its respective contributors,
+licensed under the GNU Lesser General Public License, version 2.1 or later.
+The libusb license is included as LICENSES/libusb-LGPL-2.1.txt.
+libusb project: https://libusb.info/ and https://github.com/libusb/libusb
+
+Project source and releases: https://github.com/adriweb/safari-webusb
+Dependency version and source checksum: dependencies/libusb.json in the source.
+
+The project was inspired by ArcaneNibble/awawausb. No awawausb code is included.
+The build uses Apple's Safari Web Extension converter to generate the containing
+app wrapper. Preserve those generated sources when distributing relinking materials.

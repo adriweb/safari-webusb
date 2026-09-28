@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Safari Serial and HID smoke test</title>
+<style>body{font:16px system-ui;max-width:900px;margin:3rem auto;padding:0 1rem}button,input{font:inherit;margin:.3rem;padding:.4rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f4f6;padding:1rem}section{margin:2rem 0}</style>
+<h1>Safari Serial and HID smoke test</h1>
+<p>Enable the extension for localhost and keep the signed app running. These controls send no serial bytes, output reports, or feature reports. Opening a serial port can change modem signals.</p>
+<section><h2>Serial</h2><label>Baud rate <input id="baud" type="number" value="115200" min="1"></label><br>
+<button id="serialChoose">Choose port</button><button id="serialList">List granted ports</button><button id="serialOpen">Open and read input</button><button id="serialClose">Close</button><button id="serialForget">Forget</button><pre id="serialInfo">No port selected.</pre></section>
+<section><h2>HID</h2><button id="hidChoose">Choose device</button><button id="hidList">List granted devices</button><button id="hidOpen">Open and listen</button><button id="hidClose">Close</button><button id="hidForget">Forget</button><pre id="hidInfo">No device selected.</pre></section>
+<h2>Activity</h2><button id="clear">Clear</button><pre id="log"></pre>
+<script src="peripherals.js"></script></html>

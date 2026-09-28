@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Safari WebUSB smoke test</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+    body { max-width: 900px; margin: 40px auto; padding: 0 20px 40px; }
+    h1 { margin-bottom: 8px; font-size: 1.9rem; }
+    h2 { font-size: 1.1rem; margin-top: 28px; }
+    p { max-width: 75ch; }
+    .muted { opacity: .75; }
+    .panel { border: 1px solid #8886; border-radius: 10px; padding: 18px; margin: 18px 0; }
+    .row { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+    label { display: grid; gap: 4px; font-size: .9rem; }
+    input { width: 120px; }
+    select { max-width: 100%; min-width: 180px; }
+    input, select, button { font: inherit; padding: 7px 10px; border: 1px solid #8888; border-radius: 6px; }
+    button { cursor: pointer; }
+    button:disabled { cursor: default; opacity: .5; }
+    #status { border-left: 4px solid #64748b; padding: 8px 12px; }
+    #status.ok { border-color: #22a060; }
+    #status.error { border-color: #dc4545; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #8881; border: 1px solid #8884; padding: 14px; border-radius: 8px; font-size: .85rem; }
+    #log { min-height: 120px; max-height: 380px; overflow-y: auto; }
+    code { font-size: .95em; }
+  </style>
+</head>
+<body>
+  <h1>Safari WebUSB smoke test</h1>
+  <p class="muted">Check extension installation, device consent, descriptors, and basic lifecycle. This page sends no control or endpoint transfers.</p>
+  <p id="status" role="status">Checking availability…</p>
+  <section class="panel" aria-label="Device permission">
+    <div class="row">
+      <label>Vendor ID (hex)<input id="vendor" value="0451" maxlength="6" spellcheck="false" autocomplete="off"></label>
+      <label>Product ID (optional hex)<input id="product" placeholder="e008" maxlength="6" spellcheck="false" autocomplete="off"></label>
+      <button id="request" disabled>Request device…</button>
+      <button id="enumerate" disabled>List granted devices</button>
+    </div>
+    <p class="muted">0451 is Texas Instruments. Select a device in the extension's chooser to grant access to this document. Clear both IDs to request any available device.</p>
+  </section>
+  <section class="panel" aria-label="Device lifecycle">
+    <div class="row">
+      <label>Selected device<select id="devices" aria-label="Selected device"><option>No device selected</option></select></label>
+      <button id="open" disabled>Open</button>
+      <button id="close" disabled>Close</button>
+      <button id="forget" disabled>Forget grant</button>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <label>Configuration<select id="configuration"><option>No configuration</option></select></label>
+      <button id="configure" disabled>Select configuration</button>
+      <button id="inspect" disabled>Refresh descriptors</button>
+    </div>
+    <p class="muted">Opening and selecting a configuration are separate actions. Configuration changes can affect the connected device. Close other software using it first.</p>
+  </section>
+  <h2>Device descriptors and current state</h2>
+  <pre id="descriptors">No device selected.</pre>
+  <h2>Activity</h2>
+  <pre id="log" role="log" aria-live="polite"></pre>
+  <script>
+    "use strict";
+    const element = id => document.getElementById(id);
+    const usb = navigator.usb;
+    let devices = [];
+    let busy = false;
+    const device = () => devices[Number(element("devices").value)];
+    const hex = value => Number(value).toString(16).padStart(4, "0");
+
+    function log(message) {
+      element("log").textContent += `${new Date().toLocaleTimeString()}  ${message}\n`;
+      element("log").scrollTop = element("log").scrollHeight;
+    }
+
+    function status(message, kind = "") {
+      element("status").textContent = message;
+      element("status").className = kind;
+    }
+
+    function describe(d) {
+      if (!d) return null;
+      return {
+        vendorId: `0x${hex(d.vendorId)}`, productId: `0x${hex(d.productId)}`,
+        manufacturerName: d.manufacturerName, productName: d.productName,
+        serialNumber: d.serialNumber, opened: d.opened,
+        usbVersion: `${d.usbVersionMajor}.${d.usbVersionMinor}.${d.usbVersionSubminor}`,
+        deviceVersion: `${d.deviceVersionMajor}.${d.deviceVersionMinor}.${d.deviceVersionSubminor}`,
+        deviceClass: d.deviceClass, deviceSubclass: d.deviceSubclass,
+        deviceProtocol: d.deviceProtocol,
+        selectedConfiguration: d.configuration?.configurationValue ?? null,
+        configurations: Array.from(d.configurations || [], c => ({
+          configurationValue: c.configurationValue, configurationName: c.configurationName,
+          interfaces: Array.from(c.interfaces || [], i => ({
+            interfaceNumber: i.interfaceNumber, claimed: i.claimed,
+            alternateSetting: i.alternate?.alternateSetting,
+            alternates: Array.from(i.alternates || [], a => ({
+              alternateSetting: a.alternateSetting, interfaceName: a.interfaceName,
+              interfaceClass: a.interfaceClass, interfaceSubclass: a.interfaceSubclass,
+              interfaceProtocol: a.interfaceProtocol,
+              endpoints: Array.from(a.endpoints || [], e => ({
+                endpointNumber: e.endpointNumber, direction: e.direction,
+                type: e.type, packetSize: e.packetSize
+              }))
+            }))
+          }))
+        }))
+      };
+    }
+
+    function refresh() {
+      const d = device();
+      element("descriptors").textContent = d ? JSON.stringify(describe(d), null, 2) : "No device selected.";
+      element("request").disabled = busy || !usb;
+      element("enumerate").disabled = busy || !usb;
+      element("devices").disabled = busy || !devices.length;
+      element("open").disabled = busy || !d || d.opened;
+      element("close").disabled = busy || !d || !d.opened;
+      element("forget").disabled = busy || !d || typeof d.forget !== "function";
+      element("inspect").disabled = busy || !d;
+      const oldConfig = element("configuration").value;
+      element("configuration").replaceChildren();
+      for (const c of d?.configurations || []) {
+        element("configuration").add(new Option(`${c.configurationValue}: ${c.configurationName || "Unnamed"}`, c.configurationValue));
+      }
+      if (oldConfig && Array.from(element("configuration").options).some(o => o.value === oldConfig)) {
+        element("configuration").value = oldConfig;
+      } else if (d?.configuration) {
+        element("configuration").value = String(d.configuration.configurationValue);
+      }
+      element("configuration").disabled = busy || !d;
+      element("configure").disabled = busy || !d?.opened || !element("configuration").options.length;
+    }
+
+    function setDevices(list, selected = list[0]) {
+      devices = list;
+      element("devices").replaceChildren();
+      devices.forEach((d, index) => element("devices").add(new Option(`${d.productName || "USB device"} (${hex(d.vendorId)}:${hex(d.productId)})`, index)));
+      if (!devices.length) element("devices").add(new Option("No device selected", ""));
+      else element("devices").value = String(Math.max(0, devices.indexOf(selected)));
+      refresh();
+    }
+
+    async function run(label, operation) {
+      if (busy) return;
+      busy = true;
+      refresh();
+      try {
+        await operation();
+        log(`${label}: OK`);
+        status(`${label} succeeded.`, "ok");
+      } catch (error) {
+        log(`${label}: ${error.name || "Error"}: ${error.message || error}`);
+        status(`${error.name || "Error"}: ${error.message || error}`, "error");
+      } finally {
+        busy = false;
+        refresh();
+      }
+    }
+
+    function parseID(id) {
+      const text = element(id).value.trim();
+      if (!text) return undefined;
+      if (!/^(?:0x)?[0-9a-f]{1,4}$/i.test(text)) throw new TypeError(`${id} must be a hexadecimal ID between 0000 and ffff.`);
+      return parseInt(text.replace(/^0x/i, ""), 16);
+    }
+
+    element("request").addEventListener("click", () => run("Request device", async () => {
+      const vendorId = parseID("vendor");
+      const productId = parseID("product");
+      if (productId !== undefined && vendorId === undefined) throw new TypeError("A product filter also needs a vendor ID.");
+      const filter = {};
+      if (vendorId !== undefined) filter.vendorId = vendorId;
+      if (productId !== undefined) filter.productId = productId;
+      // Keep requestDevice before any await to preserve the click's user activation.
+      const chosen = await usb.requestDevice({ filters: Object.keys(filter).length ? [filter] : [] });
+      const list = await usb.getDevices();
+      if (!list.includes(chosen)) list.push(chosen);
+      setDevices(list, chosen);
+    }));
+    element("enumerate").addEventListener("click", () => run("List granted devices", async () => {
+      const list = await usb.getDevices();
+      setDevices(list);
+      log(`${list.length} device(s) granted to this document.`);
+    }));
+    element("open").addEventListener("click", () => run("Open device", () => device().open()));
+    element("close").addEventListener("click", () => run("Close device", () => device().close()));
+    element("configure").addEventListener("click", () => run("Select configuration", () => device().selectConfiguration(Number(element("configuration").value))));
+    element("forget").addEventListener("click", () => run("Forget grant", async () => {
+      await device().forget();
+      setDevices(await usb.getDevices());
+    }));
+    element("inspect").addEventListener("click", () => { refresh(); log("Read cached USB descriptor properties; no transfer sent."); });
+    element("devices").addEventListener("change", refresh);
+
+    log(`Browser: ${navigator.userAgent}`);
+    log(`Origin: ${location.origin}; secure context: ${window.isSecureContext}; top-level: ${window === window.top}`);
+    if (usb) {
+      status("navigator.usb is available. Request a device to begin.", "ok");
+      usb.addEventListener("connect", event => log(`Connected: ${event.device?.productName || "USB device"}`));
+      usb.addEventListener("disconnect", event => {
+        log(`Disconnected: ${event.device?.productName || "USB device"}`);
+        refresh();
+      });
+    } else {
+      status("navigator.usb is missing. Enable Safari WebUSB, grant access to localhost, and reload this page.", "error");
+    }
+    refresh();
+  </script>
+</body>
+</html>

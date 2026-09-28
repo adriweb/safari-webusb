@@ -1,0 +1,54 @@
+{
+  "manifest_version": 2,
+  "name": "Safari WebUSB (Experimental)",
+  "description": "WebUSB, WebSerial and WebHID for macOS Safari through a bundled native device bridge.",
+  "version": "0.1.0",
+  "browser_specific_settings": {
+    "safari": {
+      "strict_min_version": "18.0"
+    }
+  },
+  "permissions": [
+    "nativeMessaging",
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "scripts": [
+      "transport.js",
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://*/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "page.js",
+        "page-serial.js",
+        "page-hid.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "MAIN"
+    }
+  ],
+  "content_security_policy": "script-src 'self'; object-src 'none'"
+}
