@@ -98,12 +98,12 @@ python3 -m http.server 8765 --bind 127.0.0.1
 Open <http://localhost:8765/tests/smoke.html> in Safari. Enable the extension for
 localhost and reload if necessary. The page offers separate buttons to:
 
-1. List devices already granted to the current document.
+1. List connected devices already authorized for this website.
 2. Request a device through the extension's chooser. The default vendor filter
    is Texas Instruments (`0451`); vendor and product IDs are editable hex values.
 3. Inspect descriptors, open the selected device, select an advertised
    configuration explicitly, and close the device.
-4. Forget the current document's grant.
+4. Forget the device permission for this website.
 
 The smoke page sends no endpoint or control transfers. Opening a device and
 selecting its configuration are separate user actions; selecting a configuration
@@ -112,8 +112,23 @@ may change device state. Choose a test device that is not in use by another app.
 For an existing WebUSB site, enable the extension for that site and reload it.
 Use its normal Connect button. The extension currently exposes the API only to
 top-level secure pages (HTTPS or localhost). Embedded frames and Web Workers are
-outside the prototype's scope. USB permissions are scoped to the current page
-session; a reload requires another device selection.
+outside the prototype's scope. The signed app remembers device permissions for
+the exact website origin and Safari profile. A site can retrieve authorized
+connected devices with `navigator.usb.getDevices()`, `navigator.serial.getPorts()`,
+or `navigator.hid.getDevices()` after a reload, without another chooser.
+Calling `requestDevice()` or `requestPort()` explicitly still opens the chooser.
+
+Devices with a usable serial number can be remembered across unplugging and
+restarting the app. Devices without one are remembered only for the current
+physical attachment and macOS boot; replugging requires choosing them again.
+This avoids authorizing a different device just because it has the same model
+or occupies the same USB port. Duplicate identities are not automatically restored.
+Private browsing and the unsigned native-message fallback keep document-only grants.
+Open the extension's **Device permissions** settings to remove individual saved
+permissions or clear all permissions for the current Safari profile. The APIs'
+`forget()` methods also revoke saved access. Revocation closes matching active
+connections in other tabs for that website. Permissions do not reopen a device,
+reclaim interfaces, or replay transfers; the website still does those operations.
 
 ## Serial and HID smoke checks
 
@@ -122,7 +137,7 @@ updated app. The page provides separate serial/HID choosers, descriptor display,
 open/close, and passive input logging. It sends no serial bytes, output reports,
 or feature reports. Opening a serial port can change its modem signals, so use
 a test device. Enable the extension for an existing Serial/HID site and reload
-it to use its normal connection flow. Permissions are per document for all APIs;
+it to use its normal connection flow. Saved permissions are separate for each API;
 choosing a USB device does not also grant its serial or HID interface.
 
 ## Architecture
@@ -162,8 +177,9 @@ unrelated local listener. The shared secret never enters JavaScript, and the
 derived connection key stays in the privileged background page.
 
 Socket loss rejects pending operations without retrying writes, invalidates
-page grants, and closes that connection's native USB sessions. A fresh chooser
-can establish a new connection. No speculative USB reads or protocol-specific
+live document grants, and closes that connection's native device sessions.
+A new device-list call or a fresh chooser can establish a new connection and
+restore remembered authorization. No speculative USB reads or protocol-specific
 buffering are used.
 
 Xcode 27's packager warns that the `world` manifest key is unsupported. The
@@ -181,9 +197,12 @@ native extension process persistence.
 
 The native request/response fields and limits are specified in
 [PROTOCOL.md](PROTOCOL.md). The background supplies origin and document session
-identity; a web page cannot choose its own authorization origin. A device grant
-requires an explicit choice in extension UI. Native operations also check the
-session's grant, so JavaScript API objects alone do not grant hardware access.
+identity; a web page cannot choose its own authorization origin. First access
+requires an explicit choice in extension UI. Subsequent lists restore only a
+matching native identity saved for that website and authenticated Safari profile.
+The private native permission store is separate from open document handles.
+Native operations still check the session's grant, so JavaScript API objects
+alone do not grant hardware access.
 
 ## Automated checks
 
@@ -216,7 +235,8 @@ leaves the connection available; quitting or restarting the app disconnects its
 clients. Losing a socket invalidates that connection's document grants and
 closes its native USB, serial and HID sessions. Pending operations fail without
 automatic replay. Serial streams error and opened HID devices receive disconnects.
-Open Safari WebUSB again, reload the website, and choose the device again.
+Open Safari WebUSB again and reload the website. It can list remembered devices
+and open a new connection; unsaved devices need another chooser.
 
 Ad-hoc builds without a signed app group use the compatibility transport, which
 retains handles in Safari's native extension process. Apple does not promise
@@ -250,16 +270,17 @@ Firefox's long-lived stdio host mechanism.
   per stream pull. Ordinary requests remain globally ordered; a slow USB transfer or
   blocked write can delay subsequent commands by up to its timeout. Sustained
   high-rate streaming across devices still needs workload-specific validation.
-- Device reconnects require selecting the device again. Disconnects are polled
-  every 10 seconds; there is no automatic restoration of grants after replugging.
+- Disconnects are polled every 10 seconds. Remembered devices with a stable serial
+  identity are restored by subsequent lists; devices without one need selection
+  again after replugging. Live handles and interface claims are never restored.
 - Restoring a page from Safari's back/forward cache requires a reload to create
   a fresh document connection.
 - The extension cannot grant access to interfaces owned exclusively by a macOS
   driver or another application. It should not detach system drivers.
 - WebSerial supports local macOS serial ports, USB vendor/product filters,
   baud/data/stop/parity/flow-control settings, readable/writable streams, modem
-  signals, drain, close and forget. Bluetooth service selection, worker APIs,
-  and persistent permissions are unsupported. Existing OS-exposed Bluetooth
+  signals, drain, close and forget. Bluetooth service selection and worker APIs
+  are unsupported. Existing OS-exposed Bluetooth
   serial ports can appear as generic serial ports. Driver-specific signal and
   custom-baud support varies; parity/framing/overrun errors are not individually
   classified by this POSIX backend.

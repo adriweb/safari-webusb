@@ -220,9 +220,8 @@
       } finally { slot.busy = false; }
     }
     async forget() {
-      // Physical/bridge disconnect already revokes the document's native grant.
-      if (!state(this).connected) return;
-      const slot = ready(this, false);
+      const slot = state(this);
+      if (slot.busy) throw exception("InvalidStateError", "A serial state change is already in progress.");
       slot.busy = true;
       try {
         await rpc("serial.forget", { deviceId: slot.snapshot.id });

@@ -36,7 +36,8 @@ def copy_generated(source, destination):
 for name in ("USBBackend.h", "USBBackend.m", "SafariWebExtensionHandler.m",
              "USBTransportAuth.h", "USBTransportAuth.m", "USBLoopbackServer.h", "USBLoopbackServer.m", "DeviceBridgeBackend.h", "DeviceBridgeBackend.m",
              "SerialBackend.h", "SerialBackend.m", "HIDBackend.h", "HIDBackend.m",
-             "HIDReportDescriptor.h", "HIDReportDescriptor.m"):
+             "HIDReportDescriptor.h", "HIDReportDescriptor.m", "PermissionIdentity.h",
+             "DevicePermissionStore.h", "DevicePermissionStore.m"):
     copy_generated(ROOT / "native" / name, native_dir / name)
 for name in ("AppDelegate.m", "ViewController.m"):
     copy_generated(ROOT / "native" / name, PROJECT / "Safari WebUSB" / name)
@@ -94,7 +95,7 @@ for target_id in project["targets"]:
     add_file("Native/USBBackend.m", "sourcecode.c.objc", sources)
     add_file("Native/USBTransportAuth.m", "sourcecode.c.objc", sources)
     if not extension:
-        for name in ("DeviceBridgeBackend", "SerialBackend", "HIDBackend", "HIDReportDescriptor"):
+        for name in ("DeviceBridgeBackend", "SerialBackend", "HIDBackend", "HIDReportDescriptor", "DevicePermissionStore"):
             add_file("Native/" + name + ".m", "sourcecode.c.objc", sources)
         add_file("Native/USBLoopbackServer.m", "sourcecode.c.objc", sources)
         resources = PROJECT / "DistributionResources"

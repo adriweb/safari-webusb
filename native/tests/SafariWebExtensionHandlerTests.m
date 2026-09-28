@@ -49,6 +49,7 @@ static void replyFromBackend(NSDictionary *response) {
 }
 
 @implementation USBBackend
+- (void)permissionDevicesWithCompletion:(void (^)(NSArray<NSDictionary *> *))completion { completion(@[]); }
 + (instancetype)sharedBackend {
     static USBBackend *backend;
     if (!backend) backend = [self new];

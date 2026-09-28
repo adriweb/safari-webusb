@@ -97,7 +97,8 @@
           connection.resolve(connection);
         } else if (connection.state === "ready" && message.type === "event") {
           if (typeof message.session !== "string" || message.session.length > 128 || !object(message.event)
-              || !/^(serial|hid)\.(data|error|inputreport|connect|disconnect)$/.test(message.event.event)
+              || (!/^(serial|hid)\.(data|error|inputreport|connect|disconnect)$/.test(message.event.event)
+                && !(message.event.event === "permissions.revoked" && ["usb", "serial", "hid"].includes(message.event.kind)))
               || typeof message.event.deviceId !== "string" || message.event.deviceId.length > 128)
             throw fail("NetworkError", "Invalid native device event.");
           onEvent(message.session, message.event);
@@ -150,7 +151,7 @@
     function connect(message) {
       if (stopped) return Promise.reject(fail("AbortError", "Safari WebUSB transport was stopped."));
       if (current) return current.promise;
-      if (blocked && !["enumerate", "serial.enumerate", "hid.enumerate"].includes(message.op)) return Promise.reject(fail("InvalidStateError", `The USB transport disconnected. ${launch}`));
+      if (blocked && !["enumerate", "serial.enumerate", "hid.enumerate", "getDevices", "serial.getPorts", "hid.getDevices", "permissions.list"].includes(message.op)) return Promise.reject(fail("InvalidStateError", `The USB transport disconnected. ${launch}`));
       blocked = false;
       const connection = {pending: new Map(), closed: false, legacy: false, state: "bootstrap"};
       connection.promise = new Promise((resolve, reject) => { connection.resolve = resolve; connection.reject = reject; });
@@ -161,13 +162,14 @@
     }
     return {
       get minimumGap() { return current?.legacy ? 40 : 0; },
+      get supportsRememberedPermissions() { return current?.state === "ready" && !current.legacy; },
       async send(message) {
         if (!object(message)) throw fail("TypeError", "Invalid native USB request.");
         if (inFlight >= maxPending) throw fail("QuotaExceededError", "Too many pending USB transport requests.");
         ++inFlight;
         try {
           const connection = await connect(message);
-          if (connection.legacy && /^(serial|hid)\./.test(message.op)) throw fail("NotSupportedError", "WebSerial and WebHID require the signed Safari WebUSB app and its persistent connection. Launch the app, then reload this page.");
+          if (connection.legacy && /^(serial|hid|permissions)\./.test(message.op)) throw fail("NotSupportedError", "WebSerial, WebHID and saved permission settings require the signed Safari WebUSB app and its persistent connection. Launch the app, then reload this page.");
           if (connection.closed) throw fail("NetworkError", `Safari WebUSB disconnected. ${launch}`);
           return await new Promise((resolve, reject) => {
             const id = crypto.randomUUID();

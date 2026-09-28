@@ -1,4 +1,5 @@
 #import "SerialBackend.h"
+#import "PermissionIdentity.h"
 #import <IOKit/IOKitLib.h>
 #import <IOKit/serial/IOSerialKeys.h>
 #import <IOKit/serial/ioss.h>
@@ -125,6 +126,10 @@ static id SerialRegistryValue(io_registry_entry_t service, CFStringRef key) {
             id productId = SerialRegistryValue(service, CFSTR("idProduct"));
             if (SerialInteger(vendor, 0, UINT16_MAX)) port[@"usbVendorId"] = vendor;
             if (SerialInteger(productId, 0, UINT16_MAX)) port[@"usbProductId"] = productId;
+            id serial = SerialRegistryValue(service, CFSTR("USB Serial Number"));
+            id interface = SerialRegistryValue(service, CFSTR("bInterfaceNumber"));
+            if (PermissionSerialIsUsable(serial)) port[@"usbSerialNumber"] = serial;
+            if (SerialInteger(interface, 0, UINT8_MAX)) port[@"usbInterfaceNumber"] = interface;
             [ports addObject:port];
         }
         IOObjectRelease(service);
@@ -166,6 +171,30 @@ static id SerialRegistryValue(io_registry_entry_t service, CFStringRef key) {
     for (NSString *key in @[@"usbVendorId", @"usbProductId"]) if (device[key]) result[key] = device[key];
     return result;
 }
+- (void)permissionDevicesWithCompletion:(void (^)(NSArray<NSDictionary *> *records))completion {
+    dispatch_async(self.queue, ^{
+        [self refreshDevices];
+        NSMutableArray *records = [NSMutableArray array];
+        for (NSString *identifier in self.devices) {
+            NSDictionary *port = self.devices[identifier];
+            NSArray *hardware = @[port[@"usbVendorId"] ?: NSNull.null, port[@"usbProductId"] ?: NSNull.null];
+            // A USB serial number identifies the adapter, not necessarily its
+            // port. Without the USB interface discriminator keep this grant
+            // limited to the current attachment (also covers Bluetooth ports).
+            BOOL durable = PermissionSerialIsUsable(port[@"usbSerialNumber"]) &&
+                SerialInteger(port[@"usbVendorId"], 0, UINT16_MAX) && SerialInteger(port[@"usbProductId"], 0, UINT16_MAX) &&
+                SerialInteger(port[@"usbInterfaceNumber"], 0, UINT8_MAX);
+            NSString *attachment = port[@"registryId"];
+            if (![attachment isKindOfClass:NSString.class] || [attachment isEqual:@"0"]) attachment = @"";
+            NSString *identity = durable ? PermissionIdentityKey(@[@"serial", @"serial", hardware,
+                port[@"usbSerialNumber"], port[@"usbInterfaceNumber"]]) :
+                PermissionAttachmentIdentity(@"serial", hardware, attachment, identifier);
+            [records addObject:@{@"device": [self snapshot:identifier session:nil], @"identity": identity, @"durable": @(durable)}];
+        }
+        completion(records);
+    });
+}
+
 - (void)finishConnection:(SerialConnection *)connection completion:(void (^)(void))completion {
     if (completion) [connection.closeCompletions addObject:[completion copy]];
     if (connection.closing) return;

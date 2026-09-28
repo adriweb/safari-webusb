@@ -38,6 +38,7 @@ static NSError *USBTransportError(NSString *description) {
 @interface USBLoopbackSession : NSObject
 @property(nonatomic, copy) NSString *identifier;
 @property(nonatomic, copy) NSString *origin;
+@property(nonatomic) BOOL privateBrowsing;
 @property(nonatomic) BOOL closed;
 @property(nonatomic) BOOL cleaned;
 @property(nonatomic) NSTimeInterval lastSeen;
@@ -83,6 +84,7 @@ static NSError *USBTransportError(NSString *description) {
 @property(nonatomic) nw_connection_t connection;
 @property(nonatomic, copy) NSString *origin;
 @property(nonatomic, copy) NSString *profile;
+@property(nonatomic, copy) NSString *permissionProfile;
 @property(nonatomic, copy) NSString *key;
 @property(nonatomic, copy) NSString *challenge;
 @property(nonatomic) BOOL authenticated;
@@ -300,7 +302,7 @@ static NSError *USBTransportError(NSString *description) {
     // This narrowly scoped cancellation must reach the serial queue while its
     // write callback is pending. The router still validates the complete native
     // session, instance, origin and grant before touching the port.
-    [[DeviceBridgeBackend sharedBackend] handleMessage:request.message profile:request.peer.profile completion:^(NSDictionary *response) {
+    [[DeviceBridgeBackend sharedBackend] handleMessage:request.message profile:request.peer.profile permissionProfile:request.peer.permissionProfile completion:^(NSDictionary *response) {
         dispatch_async(self.queue, ^{
             [self.aborts removeObject:request];
             [request.peer.pending removeObject:request.identifier];
@@ -321,6 +323,7 @@ static NSError *USBTransportError(NSString *description) {
             NSString *nonce = claims[@"nonce"], *profile = claims[@"profile"], *key = claims[@"key"];
             if (!claims || !USBTransportString(nonce, 16, 128) || !USBTransportString(profile, 1, 200) || !USBTransportString(key, 1, 128) || self.usedNonces[nonce] || self.usedNonces.count >= USBMaximumNonces) { [peer fail:@"SecurityError" message:@"USB transport capability expired, invalid or already used."]; return; }
             self.usedNonces[nonce] = claims[@"expires"];
+            peer.permissionProfile = profile; // Stable Safari profile from the verified capability only.
             peer.profile = [NSString stringWithFormat:@"%@:%@", profile, NSUUID.UUID.UUIDString];
             peer.key = key; peer.challenge = NSUUID.UUID.UUIDString;
             NSString *proof = USBTransportProof(key, [NSString stringWithFormat:@"server:%@:%@", challenge, peer.challenge]);
@@ -342,9 +345,26 @@ static NSError *USBTransportError(NSString *description) {
     if ([peer.pending containsObject:identifier]) { [peer fail:@"TypeError" message:@"Duplicate pending USB request identifier."]; return; }
     USBLoopbackRequest *request = [USBLoopbackRequest new]; request.peer = peer; request.identifier = identifier; request.message = message[@"message"];
     NSString *sessionID = request.message[@"session"], *origin = request.message[@"origin"], *op = request.message[@"op"];
+    BOOL management = [op isKindOfClass:NSString.class] && [op hasPrefix:@"permissions."];
+    id managementFlag = request.message[@"extensionManagement"];
+    BOOL trustedManagement = management && managementFlag == (__bridge id)kCFBooleanTrue && [origin isEqual:peer.origin] &&
+        [@[@"permissions.list", @"permissions.revoke", @"permissions.clear"] containsObject:op];
+    if (management || managementFlag) {
+        // Only the authenticated extension's own origin can manage permissions.
+        // Its background separately authenticates the exact settings-page sender.
+        if (!trustedManagement || !USBTransportString(sessionID, 16, 128)) {
+            [self requestError:request name:@"SecurityError" message:@"Permission management requires the extension settings page."]; return;
+        }
+        if (peer.pending.count >= USBMaximumPeerPending || self.requests.count + self.aborts.count + (self.active ? 1 : 0) >= USBMaximumPending) {
+            [self requestError:request name:@"QuotaExceededError" message:@"Too many pending device requests."]; return;
+        }
+        request.deadline = USBTransportNow() + USB_TRANSPORT_ADMISSION_SECONDS;
+        [peer.pending addObject:identifier]; [self.requests addObject:request]; [self pump]; return;
+    }
     if (!USBTransportString(sessionID, 16, 128) || !USBTransportPageOrigin(origin) || !USBTransportString(op, 1, 64)) { [self requestError:request name:@"SecurityError" message:@"USB requests require a document session and secure origin."]; return; }
     USBLoopbackSession *session = peer.sessions[sessionID];
-    if (session && ![session.origin isEqual:origin]) { [self requestError:request name:@"SecurityError" message:@"USB document origin does not match its session."]; return; }
+    BOOL privateBrowsing = request.message[@"privateBrowsing"] != (__bridge id)kCFBooleanFalse;
+    if (session && (![session.origin isEqual:origin] || session.privateBrowsing != privateBrowsing)) { [self requestError:request name:@"SecurityError" message:@"USB document origin does not match its session."]; return; }
     if (session.closed) { [self requestError:request name:@"AbortError" message:@"USB document session has closed."]; return; }
     if ([op isEqual:@"closeSession"]) {
         if (!session) { [self requestError:request name:@"InvalidStateError" message:@"Unknown USB document session."]; return; }
@@ -379,7 +399,7 @@ static NSError *USBTransportError(NSString *description) {
     }
     if (!session) {
         if (peer.sessions.count >= USBMaximumSessions) { [self requestError:request name:@"QuotaExceededError" message:@"Too many USB document sessions."]; return; }
-        session = [USBLoopbackSession new]; session.identifier = sessionID; session.origin = origin; peer.sessions[sessionID] = session;
+        session = [USBLoopbackSession new]; session.identifier = sessionID; session.origin = origin; session.privateBrowsing = privateBrowsing; peer.sessions[sessionID] = session;
     }
     session.lastSeen = USBTransportNow();
     request.session = session; request.deadline = session.lastSeen + USB_TRANSPORT_ADMISSION_SECONDS;
@@ -413,7 +433,7 @@ static NSError *USBTransportError(NSString *description) {
         [peer.cleanupSessions removeObjectAtIndex:0];
         if (session.cleaned) continue;
         request = [USBLoopbackRequest new]; request.peer = peer; request.session = session; request.cleanup = YES;
-        request.message = @{@"version": @1, @"op": @"closeSession", @"session": session.identifier, @"origin": session.origin, @"instance": self.backendInstance, @"args": @{}};
+        request.message = @{@"version": @1, @"op": @"closeSession", @"session": session.identifier, @"origin": session.origin, @"privateBrowsing": @(session.privateBrowsing), @"instance": self.backendInstance, @"args": @{}};
         break;
     }
     if (!request && self.closeRequests.count) {
@@ -425,7 +445,7 @@ static NSError *USBTransportError(NSString *description) {
     }
     if (!request) return;
     self.active = request;
-    [[DeviceBridgeBackend sharedBackend] handleMessage:request.message profile:request.peer.profile completion:^(NSDictionary *response) {
+    void (^completion)(NSDictionary *) = ^(NSDictionary *response) {
         dispatch_async(self.queue, ^{
             if (USBTransportString(response[@"instance"], 1, 128)) self.backendInstance = response[@"instance"];
             self.active = nil;
@@ -436,6 +456,10 @@ static NSError *USBTransportError(NSString *description) {
             }
             [self pump];
         });
-    }];
+    };
+    if ([request.message[@"op"] hasPrefix:@"permissions."])
+        [[DeviceBridgeBackend sharedBackend] handlePermissionMessage:request.message permissionProfile:request.peer.permissionProfile completion:completion];
+    else
+        [[DeviceBridgeBackend sharedBackend] handleMessage:request.message profile:request.peer.profile permissionProfile:request.peer.permissionProfile completion:completion];
 }
 @end

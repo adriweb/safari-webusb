@@ -1,4 +1,5 @@
 #import "HIDBackend.h"
+#import "PermissionIdentity.h"
 #import "HIDReportDescriptor.h"
 #import <IOKit/hid/IOHIDManager.h>
 #import <IOKit/hid/IOHIDKeys.h>
@@ -46,6 +47,8 @@ static id HIDProperty(IOHIDDeviceRef device, CFStringRef name) {
 @property(nonatomic) NSNumber *vendor;
 @property(nonatomic) NSNumber *product;
 @property(nonatomic) NSString *productName;
+@property(nonatomic) NSString *permissionIdentity;
+@property(nonatomic) BOOL permissionDurable;
 @end
 @implementation HIDDeviceRecord
 - (void)dealloc { if (_device) CFRelease(_device); }
@@ -171,14 +174,18 @@ static void HIDReportComplete(void *context, IOReturn result, void *sender, IOHI
     if (!self.manager) return;
     CFSetRef set = IOHIDManagerCopyDevices(self.manager);
     NSSet *current = CFBridgingRelease(set);
-    NSMutableDictionary<NSNumber *, HIDDeviceRecord *> *previous = [NSMutableDictionary dictionary];
-    for (HIDDeviceRecord *record in self.devices.allValues) previous[@(record.registryID)] = record;
+    NSMutableDictionary *previous = [NSMutableDictionary dictionary];
+    for (HIDDeviceRecord *record in self.devices.allValues) {
+        id attachmentKey = record.registryID ? @(record.registryID) : [NSValue valueWithPointer:record.device];
+        previous[attachmentKey] = record;
+    }
     NSMutableSet *seen = [NSMutableSet set];
     for (id object in current) {
         IOHIDDeviceRef device = (__bridge IOHIDDeviceRef)object;
         uint64_t registryID = 0;
         if (IORegistryEntryGetRegistryEntryID(IOHIDDeviceGetService(device), &registryID) != kIOReturnSuccess) continue;
-        HIDDeviceRecord *record = previous[@(registryID)];
+        id attachmentKey = registryID ? @(registryID) : [NSValue valueWithPointer:device];
+        HIDDeviceRecord *record = previous[attachmentKey];
         if (record) { [seen addObject:record.identifier]; continue; }
         if (self.devices.count >= HIDMaximumDevices) continue;
         NSUInteger vendor = 0, product = 0;
@@ -188,7 +195,8 @@ static void HIDReportComplete(void *context, IOReturn result, void *sender, IOHI
         NSUInteger page = 0, usage = 0;
         if (HIDInteger(HIDProperty(device, CFSTR(kIOHIDPrimaryUsagePageKey)), 65535, &page) &&
             HIDInteger(HIDProperty(device, CFSTR(kIOHIDPrimaryUsageKey)), 65535, &usage) && HIDUsageIsProtected((uint32_t)((page << 16) | usage))) continue;
-        NSDictionary *descriptor = HIDParseReportDescriptor(HIDProperty(device, CFSTR(kIOHIDReportDescriptorKey)), NULL);
+        NSData *reportDescriptor = HIDProperty(device, CFSTR(kIOHIDReportDescriptorKey));
+        NSDictionary *descriptor = HIDParseReportDescriptor(reportDescriptor, NULL);
         if (!descriptor) continue;
         record = [[HIDDeviceRecord alloc] init];
         record.device = (IOHIDDeviceRef)CFRetain(device); record.registryID = registryID;
@@ -196,10 +204,33 @@ static void HIDReportComplete(void *context, IOReturn result, void *sender, IOHI
         record.vendor = @(vendor); record.product = @(product); record.descriptor = descriptor;
         id name = HIDProperty(device, CFSTR(kIOHIDProductKey));
         record.productName = [name isKindOfClass:NSString.class] ? [name substringToIndex:MIN([name length], 512)] : @"HID device";
+        id serial = HIDProperty(device, CFSTR(kIOHIDSerialNumberKey));
+        id interface = CFBridgingRelease(IORegistryEntrySearchCFProperty(IOHIDDeviceGetService(device), kIOServicePlane,
+            CFSTR("bInterfaceNumber"), kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents));
+        NSArray *hardware = @[record.vendor, record.product];
+        // Identical report descriptors may occur on multiple interfaces. Only
+        // serial + interface + descriptor/usage is durable; incomplete identity
+        // stays tied to this IOKit registry entry for the current boot.
+        record.permissionDurable = PermissionSerialIsUsable(serial) && HIDInteger(interface, UINT8_MAX, NULL);
+        record.permissionIdentity = record.permissionDurable ? PermissionIdentityKey(@[@"hid", @"serial", hardware,
+            serial, interface, @(page), @(usage), PermissionDescriptorHash(reportDescriptor)]) :
+            PermissionAttachmentIdentity(@"hid", hardware, registryID ? [NSString stringWithFormat:@"%llu", registryID] : @"", record.identifier);
         self.devices[record.identifier] = record; [seen addObject:record.identifier];
     }
     for (NSString *identifier in [self.devices.allKeys copy]) if (![seen containsObject:identifier]) [self removeDevice:identifier];
 }
+- (void)permissionDevicesWithCompletion:(void (^)(NSArray<NSDictionary *> *records))completion {
+    dispatch_async(self.queue, ^{
+        [self refreshDevices];
+        NSMutableArray *records = [NSMutableArray array];
+        for (HIDDeviceRecord *record in self.devices.allValues) {
+            [records addObject:@{@"device": [self snapshot:record session:nil],
+                @"identity": record.permissionIdentity, @"durable": @(record.permissionDurable)}];
+        }
+        completion(records);
+    });
+}
+
 - (void)closeSession:(NSString *)session {
     if (![session isKindOfClass:NSString.class]) return;
     dispatch_async(self.queue, ^{

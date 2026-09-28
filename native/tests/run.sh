@@ -41,9 +41,15 @@ xcrun clang -fobjc-arc -O2 -Wall -Wextra -Werror -mmacosx-version-min=13.0 \
 
 # Shared document/profile lifetime and event routing across all APIs.
 xcrun clang -fobjc-arc -O2 -Wall -Wextra -Werror -mmacosx-version-min=13.0 \
-    "$NATIVE_DIR/DeviceBridgeBackend.m" "$NATIVE_DIR/tests/DeviceBridgeBackendTests.m" \
+    "$NATIVE_DIR/DeviceBridgeBackend.m" "$NATIVE_DIR/DevicePermissionStore.m" "$NATIVE_DIR/tests/DeviceBridgeBackendTests.m" \
     -framework Foundation -o "$TEST_BUILD_DIR/DeviceBridgeBackendTests"
 "$TEST_BUILD_DIR/DeviceBridgeBackendTests"
 
 "$NATIVE_DIR/tests/run-serial.sh"
 "$NATIVE_DIR/tests/run-hid.sh"
+
+# Atomic permission persistence, scope isolation, validation and failure handling.
+xcrun clang -fobjc-arc -O2 -Wall -Wextra -Werror -mmacosx-version-min=13.0 \
+    "$NATIVE_DIR/DevicePermissionStore.m" "$NATIVE_DIR/tests/DevicePermissionStoreTests.m" \
+    -framework Foundation -o "$TEST_BUILD_DIR/DevicePermissionStoreTests"
+"$TEST_BUILD_DIR/DevicePermissionStoreTests"

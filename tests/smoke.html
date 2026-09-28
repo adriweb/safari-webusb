@@ -38,7 +38,7 @@
       <button id="request" disabled>Request device…</button>
       <button id="enumerate" disabled>List granted devices</button>
     </div>
-    <p class="muted">0451 is Texas Instruments. Select a device in the extension's chooser to grant access to this document. Clear both IDs to request any available device.</p>
+    <p class="muted">0451 is Texas Instruments. Select a device once, then use List granted devices after reloading to check remembered website access. Clear both IDs to request any available device.</p>
   </section>
   <section class="panel" aria-label="Device lifecycle">
     <div class="row">
@@ -180,7 +180,7 @@
     element("enumerate").addEventListener("click", () => run("List granted devices", async () => {
       const list = await usb.getDevices();
       setDevices(list);
-      log(`${list.length} device(s) granted to this document.`);
+      log(`${list.length} authorized device(s) connected.`);
     }));
     element("open").addEventListener("click", () => run("Open device", () => device().open()));
     element("close").addEventListener("click", () => run("Close device", () => device().close()));

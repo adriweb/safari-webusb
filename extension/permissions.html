@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Device permissions</title><link rel="stylesheet" href="permissions.css"></head>
+<body><main>
+<h1>Device permissions</h1>
+<p>Websites listed here can find their authorized devices again without opening the chooser. Opening a device still requires the website to connect to it.</p>
+<p class="note">Permissions are separate for each Safari profile. Private browsing does not save or restore permissions. Devices without a unique identity are remembered only while they remain connected.</p>
+<div class="actions"><button id="refresh" type="button">Refresh</button><button id="clear" type="button" disabled>Forget all devices</button></div>
+<p id="status" role="status">Loading permissions…</p>
+<div id="permissions"></div>
+</main><script src="permissions.js"></script></body>
+</html>

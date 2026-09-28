@@ -19,6 +19,13 @@ static NSDictionary *call(SerialBackend *backend, NSString *session, NSString *o
     CHECK(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
     return result;
 }
+static NSArray *permissions(SerialBackend *backend) {
+    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+    __block NSArray *records;
+    [backend permissionDevicesWithCompletion:^(NSArray *result) { records = result; dispatch_semaphore_signal(ready); }];
+    CHECK(dispatch_semaphore_wait(ready, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    return records;
+}
 static NSData *readBytes(int fd, NSUInteger length) {
     NSMutableData *result = [NSMutableData data];
     NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + 1;
@@ -188,6 +195,36 @@ int main(void) {
         CHECK([call(backend, two, @"getPorts", nil)[@"result"] count] == 0);
         [backend closeSession:one]; [backend closeSession:two]; [backend refreshForTesting];
         backend.eventHandler = nil;
+        // Permission inventory is native-only and grants nothing by itself.
+        NSDictionary *anonymous = permissions(backend).firstObject;
+        CHECK([anonymous[@"durable"] isEqual:@NO]);
+        CHECK(anonymous[@"device"][@"registryId"] == nil && anonymous[@"device"][@"path"] == nil);
+        CHECK(anonymous[@"device"][@"identity"] == nil);
+        SerialBackend *fresh = [SerialBackend new]; [fresh setTestPorts:^{ return inventory; }];
+        CHECK([permissions(fresh).firstObject[@"identity"] isEqual:anonymous[@"identity"]]);
+        NSMutableDictionary *port = [inventory.firstObject mutableCopy]; port[@"registryId"] = @"new-attachment";
+        inventory = @[port];
+        CHECK(![permissions(fresh).firstObject[@"identity"] isEqual:anonymous[@"identity"]]);
+        port = [port mutableCopy]; port[@"usbVendorId"] = @0x451; port[@"usbProductId"] = @0xe018;
+        port[@"usbSerialNumber"] = @"Adapter serial"; inventory = @[port];
+        CHECK([permissions(fresh).firstObject[@"durable"] isEqual:@NO]); // missing interface
+        port = [port mutableCopy]; port[@"usbInterfaceNumber"] = @0; inventory = @[port];
+        NSDictionary *durable = permissions(fresh).firstObject;
+        CHECK([durable[@"durable"] isEqual:@YES]);
+        CHECK(durable[@"device"][@"usbSerialNumber"] == nil && durable[@"device"][@"usbInterfaceNumber"] == nil);
+        port = [port mutableCopy]; port[@"registryId"] = @"replugged"; inventory = @[port];
+        CHECK([permissions(fresh).firstObject[@"identity"] isEqual:durable[@"identity"]]);
+        port = [port mutableCopy]; port[@"usbInterfaceNumber"] = @1; inventory = @[port];
+        CHECK(![permissions(fresh).firstObject[@"identity"] isEqual:durable[@"identity"]]);
+        NSMutableDictionary *duplicate = [port mutableCopy]; duplicate[@"registryId"] = @"ambiguous-second-port";
+        inventory = @[port, duplicate];
+        NSArray *ambiguous = permissions(fresh);
+        CHECK(ambiguous.count == 2 && [ambiguous[0][@"identity"] isEqual:ambiguous[1][@"identity"]]);
+        CHECK([call(fresh, @"new-document", @"getPorts", nil)[@"result"] count] == 0);
+        inventory = @[@{@"registryId":@"0", @"path":portPath}];
+        NSDictionary *unknownAttachment = permissions(fresh).firstObject;
+        SerialBackend *unknownFresh = [SerialBackend new]; [unknownFresh setTestPorts:^{ return inventory; }];
+        CHECK(![permissions(unknownFresh).firstObject[@"identity"] isEqual:unknownAttachment[@"identity"]]);
         close(master);
         printf("SerialBackend: %lu assertions passed (real PTY I/O; no serial hardware accessed).\n", (unsigned long)assertions);
     }

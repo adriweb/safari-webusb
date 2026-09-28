@@ -1,4 +1,5 @@
 #import "USBBackend.h"
+#import "PermissionIdentity.h"
 #import <libusb.h>
 #import <math.h>
 #import <time.h>
@@ -232,6 +233,25 @@ static BOOL USBOriginAllowed(NSString *origin) {
     return 0;
 }
 
+- (void)permissionDevicesWithCompletion:(void (^)(NSArray<NSDictionary *> *records))completion {
+    dispatch_async(self.queue, ^{
+        if ([self refreshDevices] < 0) { completion(@[]); return; }
+        NSMutableArray *records = [NSMutableArray array];
+        for (USBDeviceRecord *record in self.devices.allValues) {
+            NSArray *hardware = @[@(record.descriptor.idVendor), @(record.descriptor.idProduct)];
+            BOOL durable = PermissionSerialIsUsable(record.serial);
+            // Darwin's libusb session data is IOKit's attachment sessionID,
+            // not the recyclable USB bus/device address or port location.
+            unsigned long session = libusb_get_session_data(record.device);
+            NSString *attachment = session ? [NSString stringWithFormat:@"%lu", session] : @"";
+            NSString *identity = durable ? PermissionIdentityKey(@[@"usb", @"serial", hardware, record.serial]) :
+                PermissionAttachmentIdentity(@"usb", hardware, attachment, record.identifier);
+            [records addObject:@{@"device": [self snapshot:record session:nil], @"identity": identity, @"durable": @(durable)}];
+        }
+        completion(records);
+    });
+}
+
 - (struct libusb_config_descriptor *)configuration:(NSInteger)value record:(USBDeviceRecord *)record {
     if (value <= 0 || value > 255) return NULL;
     struct libusb_config_descriptor *configuration = NULL;
@@ -358,7 +378,8 @@ static BOOL USBOriginAllowed(NSString *origin) {
     NSString *op = message[@"op"];
     NSDictionary *args = message[@"args"] ?: @{};
     if (![args isKindOfClass:NSDictionary.class]) return [self failure:@"TypeError" message:@"args must be an object."];
-    if (![op isEqual:@"enumerate"] && ![self.instance isEqual:message[@"instance"]]) return [self failure:@"InvalidStateError" message:@"Native USB process restarted. Choose the device again."];
+    BOOL initialList = [op isEqual:@"getDevices"] && message[@"instance"] == nil;
+    if (![op isEqual:@"enumerate"] && !initialList && ![self.instance isEqual:message[@"instance"]]) return [self failure:@"InvalidStateError" message:@"Native USB process restarted. Choose the device again."];
     if ([op isEqual:@"enumerate"]) {
         int result = [self refreshDevices];
         if (result < 0) return [self usbFailure:result action:@"Enumerate devices"];
@@ -374,6 +395,10 @@ static BOOL USBOriginAllowed(NSString *origin) {
     NSString *key = [[NSString alloc] initWithData:keyData encoding:NSUTF8StringEncoding];
     USBSession *session = self.sessions[key];
     if (session && ![session.origin isEqual:origin]) return [self failure:@"SecurityError" message:@"Document session origin does not match its grant."];
+    // Legacy native messaging has no persisted-grant router. A fresh page may
+    // list before its first chooser, but this must neither discover hardware
+    // nor bypass the instance fence of an existing document session.
+    if (initialList) return session ? [self failure:@"InvalidStateError" message:@"The native process instance is required for an existing document."] : [self success:@[]];
     if ([op isEqual:@"closeSession"]) { if (session) [self closeSession:key]; return [self success:nil]; }
     if (session) session.lastSeen = USBNow();
     if ([op isEqual:@"heartbeat"]) return session ? [self success:nil] : [self failure:@"InvalidStateError" message:@"USB document session expired. Choose the device again."];

@@ -69,6 +69,7 @@ test("one bootstrap mutually authenticates a persistent socket and keeps credent
   assert.deepEqual(await h.transport.send(request("enumerate")), success);
   assert.deepEqual(await h.transport.send(request("transferIn")), success);
   assert.equal(h.native.length, 1); assert.equal(h.sockets.length, 1); assert.equal(h.transport.minimumGap, 0);
+  assert.equal(h.transport.supportsRememberedPermissions,true);
   assert.deepEqual(h.native[0], {version: 1, op: "transportBootstrap", args: {origin}});
   assert.deepEqual(h.frames.map(f => f.type), ["hello", "authenticate", "request", "request"]);
   assert.equal(h.frames[0].token, token);
@@ -99,7 +100,8 @@ test("strict loopback endpoint rejects alternate hosts, credentials, paths and i
 test("only explicit bootstrap NotSupportedError enables legacy 40 ms mode", async () => {
   const h = harness({bootstrap: {ok: false, error: {name: "NotSupportedError", message: "No signed app group"}}});
   assert.deepEqual(await h.transport.send(request("enumerate")), success);
-  assert.equal(h.transport.minimumGap, 40); assert.equal(h.sockets.length, 0);
+  assert.equal(h.transport.minimumGap, 40);
+  assert.equal(h.transport.supportsRememberedPermissions,false); assert.equal(h.sockets.length, 0);
   assert.deepEqual(h.native.map(m => m.op), ["transportBootstrap", "enumerate"]);
   await h.transport.send(request("open"));
   assert.deepEqual(h.native.map(m => m.op), ["transportBootstrap", "enumerate", "open"]);
@@ -244,4 +246,23 @@ test("Serial and HID require event-capable signed transport instead of native-me
   for(const op of ["serial.enumerate","hid.enumerate"]) await assert.rejects(h.transport.send(request(op)),{name:"NotSupportedError"});
   assert.equal(h.native.length,1);
   assert.equal(h.native[0].op,"transportBootstrap");
+});
+
+test("fresh remembered-device lists reconnect after loss without replaying transfers", async () => {
+  for (const op of ["getDevices","serial.getPorts","hid.getDevices","permissions.list"]) {
+    const h=harness(); await h.transport.send(request("enumerate"));
+    h.sockets[0].close(); await tick();
+    await assert.rejects(h.transport.send(request("transferOut")),{name:"InvalidStateError"});
+    assert.deepEqual(await h.transport.send(request(op)),success);
+    assert.deepEqual(h.requests().map(f=>f.message.op),["enumerate",op]);
+    assert.equal(h.native.length,2);
+  }
+});
+
+test("native revocation events carry one API and reject malformed permission metadata", async () => {
+  const h=harness(); await h.transport.send(request("getDevices"));
+  for (const kind of ["usb","serial","hid"]) h.sockets[0].receive({type:"event",session:"document-session",event:{event:"permissions.revoked",kind,deviceId:"device-1"}});
+  assert.deepEqual(h.events.map(e=>e.event.kind),["usb","serial","hid"]);
+  h.sockets[0].receive({type:"event",session:"document-session",event:{event:"permissions.revoked",kind:"all",deviceId:"device-1"}});
+  assert.equal(h.disconnected.length,1);
 });

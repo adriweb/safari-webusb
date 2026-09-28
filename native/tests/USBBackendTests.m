@@ -15,6 +15,13 @@ static NSDictionary *call(USBBackend *backend, NSString *instance, NSString *ses
     return [backend handleMessage:@{@"version": @1, @"instance": instance, @"session": session, @"origin": @"https://example.com", @"op": op, @"args": args ?: @{}} profile:profile];
 }
 static BOOL fails(NSDictionary *response, NSString *name) { return [response[@"ok"] isEqual:@NO] && [response[@"error"][@"name"] isEqual:name]; }
+static NSArray *permissions(USBBackend *backend) {
+    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+    __block NSArray *records;
+    [backend permissionDevicesWithCompletion:^(NSArray *result) { records = result; dispatch_semaphore_signal(ready); }];
+    CHECK(dispatch_semaphore_wait(ready, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+    return records;
+}
 int main(void) {
     @autoreleasepool {
         USBBackend *backend = [USBBackend new];
@@ -23,6 +30,19 @@ int main(void) {
         NSString *profile = @"profile-one";
         CHECK(fails([backend handleMessage:NSNull.null profile:profile], @"TypeError"));
         CHECK(fails([backend handleMessage:@{@"version": @YES, @"op": @"enumerate"} profile:profile], @"TypeError"));
+        NSDictionary *freshList = @{@"version": @1, @"op": @"getDevices", @"origin": @"https://example.com", @"session": session};
+        NSDictionary *freshReply = [backend handleMessage:freshList profile:profile];
+        CHECK([freshReply[@"ok"] boolValue] && [freshReply[@"result"] count] == 0);
+        CHECK(fake_usb_ref_balance() == 0 && fake_usb_open_handles() == 0);
+        CHECK([[backend valueForKey:@"sessions"] count] == 0);
+        NSMutableDictionary *invalidList = [freshList mutableCopy]; invalidList[@"origin"] = @"http://untrusted.example";
+        CHECK(fails([backend handleMessage:invalidList profile:profile], @"SecurityError"));
+        invalidList = [freshList mutableCopy]; invalidList[@"session"] = @"short";
+        CHECK(fails([backend handleMessage:invalidList profile:profile], @"SecurityError"));
+        invalidList = [freshList mutableCopy]; invalidList[@"instance"] = @"stale";
+        CHECK(fails([backend handleMessage:invalidList profile:profile], @"InvalidStateError"));
+        invalidList[@"instance"] = NSNull.null;
+        CHECK(fails([backend handleMessage:invalidList profile:profile], @"InvalidStateError"));
         NSDictionary *enumeration = [backend handleMessage:@{@"version": @1, @"op": @"enumerate"} profile:profile];
         CHECK([enumeration[@"ok"] boolValue]);
         CHECK([enumeration[@"result"] count] == 1);
@@ -30,6 +50,13 @@ int main(void) {
         NSString *deviceId = enumeration[@"result"][0][@"id"];
         CHECK(fake_usb_open_handles() == 0);
         CHECK(fake_usb_ref_balance() == 1);
+        NSDictionary *anonymousPermission = permissions(backend).firstObject;
+        CHECK([anonymousPermission[@"durable"] isEqual:@NO]);
+        CHECK([anonymousPermission[@"device"][@"id"] isEqual:deviceId]);
+        CHECK(anonymousPermission[@"device"][@"identity"] == nil);
+        CHECK(anonymousPermission[@"device"][@"durable"] == nil);
+        CHECK([permissions(backend).firstObject[@"identity"] isEqual:anonymousPermission[@"identity"]]);
+        CHECK(fake_usb_open_handles() == 0);
         NSDictionary *device = @{@"deviceId": deviceId};
         CHECK(fails([backend admitMessage:@{@"version": @1, @"op": @"enumerate"} profile:profile requestedAt:-60], @"TimeoutError"));
         @autoreleasepool {
@@ -48,6 +75,7 @@ int main(void) {
         CHECK([call(backend, instance, session, profile, @"getDevices", nil)[@"result"] count] == 0);
         CHECK(fails(call(backend, instance, session, profile, @"open", device), @"SecurityError"));
         CHECK([call(backend, instance, session, profile, @"grant", device)[@"ok"] boolValue]);
+        CHECK(fails([backend handleMessage:freshList profile:profile], @"InvalidStateError"));
         CHECK([call(backend, instance, session, profile, @"open", device)[@"result"][@"opened"] boolValue]);
         CHECK(fake_usb_open_handles() == 1);
         CHECK(fails([backend handleMessage:@{@"version": @1, @"instance": instance, @"session": session, @"origin": @"https://attacker.example", @"op": @"getDevices"} profile:profile], @"SecurityError"));
@@ -107,8 +135,24 @@ int main(void) {
         enumeration = [backend handleMessage:@{@"version": @1, @"op": @"enumerate"} profile:profile];
         CHECK(![enumeration[@"result"][0][@"id"] isEqual:deviceId]);
         CHECK(fails(call(backend, instance, session, profile, @"open", device), @"NotFoundError"));
+        CHECK(![permissions(backend).firstObject[@"identity"] isEqual:anonymousPermission[@"identity"]]);
+        NSString *attachedIdentity = permissions(backend).firstObject[@"identity"];
         backend = nil;
         CHECK(fake_usb_ref_balance() == 0);
+        backend = [USBBackend new];
+        CHECK([permissions(backend).firstObject[@"identity"] isEqual:attachedIdentity]);
+        fake_usb_connected(false); CHECK(permissions(backend).count == 0);
+        fake_usb_serial("serial-one"); fake_usb_connected(true);
+        NSDictionary *durable = permissions(backend).firstObject;
+        CHECK([durable[@"durable"] isEqual:@YES]);
+        fake_usb_connected(false); CHECK(permissions(backend).count == 0);
+        fake_usb_connected(true);
+        CHECK([permissions(backend).firstObject[@"identity"] isEqual:durable[@"identity"]]);
+        CHECK(![permissions(backend).firstObject[@"device"][@"id"] isEqual:durable[@"device"][@"id"]]);
+        fake_usb_connected(false); CHECK(permissions(backend).count == 0);
+        fake_usb_serial("serial-two"); fake_usb_connected(true);
+        CHECK(![permissions(backend).firstObject[@"identity"] isEqual:durable[@"identity"]]);
+        backend = nil; CHECK(fake_usb_ref_balance() == 0);
         fprintf(stdout, "Native fake-USB tests passed (%lu assertions).\n", (unsigned long)assertions);
     }
     return 0;

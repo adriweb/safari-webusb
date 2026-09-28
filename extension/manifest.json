@@ -50,5 +50,7 @@
       "world": "MAIN"
     }
   ],
+  "options_ui": {"page": "permissions.html", "open_in_tab": true},
+  "browser_action": {"default_title": "Device permissions", "default_popup": "permissions.html"},
   "content_security_policy": "script-src 'self'; object-src 'none'"
 }

@@ -2,12 +2,15 @@
 #include "FakeUSB.h"
 #include <libusb.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
-struct libusb_device { int refs; };
+struct libusb_device { int refs; unsigned long session; };
 struct libusb_device_handle { int configuration; };
 struct libusb_context { int unused; };
-static struct libusb_device devices[2];
+static struct libusb_device devices[2] = {{.session = 100}, {.session = 101}};
+static unsigned long next_session = 102;
+static char serial_number[1025];
 static struct libusb_context context;
 static int generation, handles, calls, claims, transfer_result;
 static bool connected = true;
@@ -34,7 +37,8 @@ void fake_usb_all_protected(bool value) {
     alternates[0].bInterfaceClass = value ? 3 : 0xff;
     alternates[1].bInterfaceClass = value ? 3 : 0xff;
 }
-void fake_usb_connected(bool value) { if (value && !connected) generation = 1 - generation; connected = value; }
+void fake_usb_connected(bool value) { if (value && !connected) { generation = 1 - generation; devices[generation].session = next_session++; } connected = value; }
+void fake_usb_serial(const char *serial) { snprintf(serial_number, sizeof(serial_number), "%s", serial ? serial : ""); }
 void fake_usb_transfer_result(int result) { transfer_result = result; }
 int fake_usb_open_handles(void) { return handles; }
 int fake_usb_transfer_calls(void) { return calls; }
@@ -42,6 +46,7 @@ int fake_usb_claim_calls(void) { return claims; }
 int fake_usb_ref_balance(void) { return devices[0].refs + devices[1].refs; }
 int libusb_init(libusb_context **ctx) { *ctx = &context; return 0; }
 void libusb_exit(libusb_context *ctx) { (void)ctx; }
+unsigned long libusb_get_session_data(libusb_device *dev) { return dev->session; }
 libusb_device *libusb_ref_device(libusb_device *dev) { dev->refs++; return dev; }
 void libusb_unref_device(libusb_device *dev) { dev->refs--; }
 ssize_t libusb_get_device_list(libusb_context *ctx, libusb_device ***list) {
@@ -56,7 +61,7 @@ void libusb_free_device_list(libusb_device **list, int unref) {
 }
 int libusb_get_device_descriptor(libusb_device *dev, struct libusb_device_descriptor *desc) {
     (void)dev;
-    *desc = (struct libusb_device_descriptor){.bcdUSB = 0x0200, .bcdDevice = 0x0123, .idVendor = 0x0451, .idProduct = 0xe008, .bNumConfigurations = 2};
+    *desc = (struct libusb_device_descriptor){.bcdUSB = 0x0200, .bcdDevice = 0x0123, .idVendor = 0x0451, .idProduct = 0xe008, .bNumConfigurations = 2, .iSerialNumber = serial_number[0] ? 3 : 0};
     return 0;
 }
 int libusb_get_config_descriptor(libusb_device *dev, uint8_t index, struct libusb_config_descriptor **desc) {
@@ -103,6 +108,9 @@ int libusb_control_transfer(libusb_device_handle *handle, uint8_t type, uint8_t 
     return result < 0 ? result : transferred;
 }
 int libusb_get_string_descriptor_ascii(libusb_device_handle *handle, uint8_t index, unsigned char *data, int length) {
-    (void)handle; (void)index; (void)data; (void)length; return 0;
+    (void)handle;
+    if (index != 3) return 0;
+    int count = (int)strlen(serial_number); if (count > length) count = length;
+    memcpy(data, serial_number, (size_t)count); return count;
 }
 const char *libusb_error_name(int error) { (void)error; return "FAKE_USB_ERROR"; }

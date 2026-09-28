@@ -5,14 +5,15 @@ random per-document `session` and the top-level HTTPS/localhost `origin` from
 Safari's port sender (never page data). USB messages are JSON:
 
 ```js
-{version: 1, op: "transferIn", session, origin,
- instance: "expected native process UUID, omitted only for enumerate",
+{version: 1, op: "transferIn", session, origin, privateBrowsing: false,
+ instance: "expected native process UUID; fresh enumeration/list may omit it",
  args: {deviceId, endpointNumber: 1, length: 64}}
 ```
 
 Responses: `{ok: true, result, instance}` or
 `{ok: false, error: {name, message}, instance}`. A stale `instance` must fail
-with `InvalidStateError`, never silently recover a granted device.
+with `InvalidStateError` for handle/transfer operations, never silently reopen a
+device or replay a transfer. Fresh list operations can restore authorization.
 
 Signed builds bootstrap the socket with one native message:
 `{version:1, op:"transportBootstrap", args:{origin:<extension origin>}}`.
@@ -42,11 +43,13 @@ it closes its USB sessions. Requests are never automatically replayed.
   only the underlying legacy backend permits their omission.
 - `grant`: privileged chooser completion only; args `{deviceId}`. Creates the
   backend session/origin binding and grants a device. Returns its snapshot.
-- `getDevices`: returns snapshots of this session's granted connected devices.
+- `getDevices`: restores eligible remembered authorizations into the fresh document
+  and returns snapshots of granted connected devices. It never opens handles.
 - `heartbeat`: renews session lease; returns null. Sessions expire after 60 s.
 - `closeSession`: release handles, grants and session; returns null.
 - `open`, `close`, `reset`, `forget`: args `{deviceId}`, return snapshot except
-  `forget` returns null.
+  `forget` returns null and revokes saved permission plus matching live grants
+  for this website/profile/API. It also works for a previously granted detached ID.
 - `selectConfiguration`: args `{deviceId, configurationValue}`.
 - `claimInterface`, `releaseInterface`: args `{deviceId, interfaceNumber}`.
 - `selectAlternateInterface`: args `{deviceId, interfaceNumber, alternateSetting}`.
@@ -75,7 +78,7 @@ op, args}` and response `{source: "safari-webusb-extension", id, ok, result/erro
 Content connects one runtime port named `safari-webusb-v1`, forwards requests, and
 returns responses unchanged. Background accepts only `requestDevice` (args are
 USBDeviceRequestOptions), `getDevices`, and device operations above. `getDevices`
-returns [] until an explicit grant. `requestDevice` is gated by a trusted recent
+returns connected devices authorized by an explicit current or remembered choice. `requestDevice` is gated by a trusted recent
 gesture in the isolated content script and a privileged extension chooser.
 Native device snapshots are converted into JS USBDevice objects by the shim.
 Background may send `{event: "disconnect", deviceId}` or
@@ -111,7 +114,7 @@ grants. Event frames are bounded by the same send-queue and size caps as replies
   document/port, and never cancels another document's work.
 - `serial.getSignals`: `{deviceId}` returns a WebSerial input signal dictionary.
 - `serial.setSignals`: `{deviceId,signals:{dataTerminalReady?,requestToSend?,break?}}`.
-- `serial.close` drains/closes, and `serial.forget` revokes the document grant.
+- `serial.close` drains/closes, and `serial.forget` revokes the saved and live grant.
   Errors emit `serial.error` with `{error:{name,message}}`; removal emits
   `serial.disconnect`. All operations except enumeration require native grants.
 
@@ -134,3 +137,30 @@ collection. Serial/HID connections are exclusive per device and scoped to one
 native document session. Page-supplied paths, grants and session identities are
 never accepted. Chooser operations consume the same trusted-gesture allowance
 as WebUSB; all APIs are restricted to secure top-level documents.
+
+## Remembered permissions
+
+The socket passes two separate native contexts: a random connection namespace
+for live document handles, and the stable Safari profile from its verified token
+for remembered permissions. A page-supplied profile is never consulted.
+`privateBrowsing` comes from Safari's privileged sender metadata, is immutable
+within a document, and must be the JSON boolean `false` to enable persistence.
+Missing or unknown private status cannot load or save ordinary permissions.
+
+The native store keys permissions by exact origin, profile, API, and device
+identity. Device identity never reaches the web page. Serial-bearing devices use
+vendor/product/serial plus interface discriminators where needed. Other devices
+use boot-scoped OS attachment identity, never USB address or model alone.
+Restoration requires exactly one matching attached device and goes through the
+same native grant validation as the chooser. Store entries do not contain handles.
+
+The extension settings page has a separate privileged protocol:
+`permissions.list` (no args), `permissions.revoke` (`{id}`), and
+`permissions.clear` (no args). Its envelope includes `extensionManagement:true`,
+a random session, `privateBrowsing:false`, and the extension's own origin.
+The background authenticates the exact settings-page sender; the socket requires
+the origin to equal the authenticated WebSocket extension origin. Page requests
+cannot invoke these operations. Lists expose only opaque permission IDs and
+website/device labels, never device identity keys. Revocation is limited to the
+current authenticated Safari profile and emits `permissions.revoked` events with
+`{kind,deviceId}` to matching live documents.

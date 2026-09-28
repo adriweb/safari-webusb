@@ -32,10 +32,18 @@ NSString *USBTransportProof(NSString *key, NSString *message) { return [NSString
 BOOL USBTransportConstantEqual(NSString *a, NSString *b) { return [a isEqual:b]; }
 
 @implementation DeviceBridgeBackend
+- (instancetype)initWithPermissionStore:(DevicePermissionStore *)store { (void)store; return [super init]; }
 + (instancetype)sharedBackend { static DeviceBridgeBackend *backend; static dispatch_once_t once; dispatch_once(&once, ^{ backend = [self new]; }); return backend; }
 - (NSDictionary *)handleMessage:(id)message profile:(NSString *)profile { (void)message; (void)profile; CHECK(NO); return @{}; }
 - (void)handleMessage:(NSDictionary *)message profile:(NSString *)profile completion:(void (^)(NSDictionary *))completion {
-    [callLock lock]; [calls addObject:@{@"message": message, @"profile": profile}]; [callLock unlock];
+    [self handleMessage:message profile:profile permissionProfile:nil completion:completion];
+}
+- (void)handlePermissionMessage:(NSDictionary *)message permissionProfile:(NSString *)profile completion:(void (^)(NSDictionary *))completion {
+    [callLock lock]; [calls addObject:@{@"message":message, @"permissionProfile":profile, @"management":@YES}]; [callLock unlock];
+    completion(@{@"ok":@YES, @"instance":@"test-instance", @"result":@[]});
+}
+- (void)handleMessage:(NSDictionary *)message profile:(NSString *)profile permissionProfile:(NSString *)permissionProfile completion:(void (^)(NSDictionary *))completion {
+    [callLock lock]; [calls addObject:@{@"message": message, @"profile": profile, @"permissionProfile":permissionProfile ?: @""}]; [callLock unlock];
     if ([@[@"serial.write", @"serial.abortWrite"] containsObject:message[@"op"]] && [message[@"args"][@"hold"] boolValue]) {
         NSString *key = [NSString stringWithFormat:@"%@:%@", message[@"session"], message[@"op"]];
         [callLock lock]; CHECK(!heldCompletions[key]); heldCompletions[key] = [completion copy]; [callLock unlock];
@@ -116,6 +124,7 @@ static void runTests(void) {
         CHECK([reply[@"response"][@"result"] isEqual:@{@"data": @"AAECA/7/", @"length": @6}]);
         NSString *firstProfile = snapshot().lastObject[@"profile"];
         CHECK([firstProfile hasPrefix:@"test-profile:"]);
+        CHECK([snapshot().lastObject[@"permissionProfile"] isEqual:@"test-profile"]);
         // Unsolicited input is private to the authenticated connection/document,
         // independent of pending request IDs or a slow request in flight.
         [DeviceBridgeBackend sharedBackend].eventHandler(@"wrong-profile", session, @{@"event":@"serial.data", @"deviceId":@"secret", @"data":@"AA=="});
@@ -150,7 +159,45 @@ static void runTests(void) {
         client = authorized();
         send(client, request(@"new", session, @"enumerate", @{})); receive(client);
         CHECK(![snapshot().lastObject[@"profile"] isEqual:firstProfile]);
+        CHECK([snapshot().lastObject[@"permissionProfile"] isEqual:@"test-profile"]);
         closeClient(client);
+
+        // Stable permission identity comes from authentication, never request JSON.
+        client = authorized();
+        NSString *normalSession = NSUUID.UUID.UUIDString;
+        NSMutableDictionary *normal = [request(@"normal", normalSession, @"getDevices", @{}) mutableCopy];
+        NSMutableDictionary *normalMessage = [normal[@"message"] mutableCopy];
+        normalMessage[@"privateBrowsing"] = @NO; normalMessage[@"permissionProfile"] = @"forged-profile";
+        normal[@"message"] = normalMessage; send(client, normal); receive(client);
+        CHECK([snapshot().lastObject[@"permissionProfile"] isEqual:@"test-profile"]);
+        normalMessage[@"privateBrowsing"] = @YES; normal[@"id"] = @"changed-private";
+        send(client, normal); CHECK([receive(client)[@"error"][@"name"] isEqual:@"SecurityError"]);
+        normalMessage[@"privateBrowsing"] = @0; normal[@"id"] = @"numeric-false";
+        send(client, normal); CHECK([receive(client)[@"error"][@"name"] isEqual:@"SecurityError"]);
+
+        // Manager operations cannot be smuggled in under a normal website origin,
+        // another extension origin, or a truthy non-boolean privilege marker.
+        NSMutableDictionary *manager = [request(@"manager", NSUUID.UUID.UUIDString, @"permissions.list", @{}) mutableCopy];
+        NSMutableDictionary *managerMessage = [manager[@"message"] mutableCopy];
+        manager[@"message"] = managerMessage;
+        send(client, manager); CHECK([receive(client)[@"error"][@"name"] isEqual:@"SecurityError"]);
+        managerMessage[@"extensionManagement"] = @YES;
+        send(client, manager); CHECK([receive(client)[@"error"][@"name"] isEqual:@"SecurityError"]);
+        managerMessage[@"origin"] = @"safari-web-extension://another-extension";
+        send(client, manager); CHECK([receive(client)[@"error"][@"name"] isEqual:@"SecurityError"]);
+        managerMessage[@"origin"] = extensionOrigin; managerMessage[@"extensionManagement"] = @1;
+        send(client, manager); CHECK([receive(client)[@"error"][@"name"] isEqual:@"SecurityError"]);
+        managerMessage[@"extensionManagement"] = @YES; managerMessage[@"privateBrowsing"] = @NO;
+        send(client, manager); CHECK([receive(client)[@"type"] isEqual:@"response"]);
+        CHECK([snapshot().lastObject[@"management"] boolValue]);
+        CHECK([snapshot().lastObject[@"permissionProfile"] isEqual:@"test-profile"]);
+        normalMessage[@"privateBrowsing"] = @NO; normalMessage[@"extensionManagement"] = @YES;
+        normal[@"id"] = @"unexpected-marker";
+        send(client, normal); CHECK([receive(client)[@"error"][@"name"] isEqual:@"SecurityError"]);
+        closeClient(client);
+        waitFor(^BOOL{ return [[snapshot() filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"message.op == %@ AND message.session == %@", @"closeSession", normalSession]] count] == 1; });
+        NSDictionary *cleanup = [[snapshot() filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"message.op == %@ AND message.session == %@", @"closeSession", normalSession]] lastObject];
+        CHECK(cleanup[@"message"][@"privateBrowsing"] == (__bridge id)kCFBooleanFalse);
 
         NSString *used = token(extensionOrigin, NSUUID.UUID.UUIDString);
         client = connectClient(extensionOrigin); authenticate(client, used); closeClient(client);

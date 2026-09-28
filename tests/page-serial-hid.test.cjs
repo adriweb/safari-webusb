@@ -108,7 +108,7 @@ for (const kind of ["serial", "hid"]) {
     await assert.rejects(h.api[get](), { name: "InvalidStateError" });
     await assert.rejects(device.open({ baudRate: 9600 }), { name: "NetworkError" });
     const requests = h.requests.length;
-    await device.forget(); assert.equal(h.requests.length, requests);
+    await assert.rejects(device.forget(), {name:"InvalidStateError"}); assert.equal(h.requests.length, requests);
   });
   test(`${kind}: only same-window same-origin replies resolve pending requests; pagehide aborts`, async () => {
     const h = harness(kind), get = kind === "serial" ? "getPorts" : "getDevices";
@@ -338,4 +338,13 @@ test("HID: input reports can arrive during a pending output report and disconnec
   assert.equal(received, true);
   h.event({ event: "hid.disconnect", deviceId: h.current.id }); await output;
   assert.equal(device.opened, false); assert.equal(h.timers.size, 0);
+});
+
+for (const kind of ["serial", "hid"]) test(`${kind}: forget after physical unplug still removes saved permission`, async () => {
+  const h=harness(kind), get=kind==="serial"?"getPorts":"getDevices";
+  const [device]=await h.api[get]();
+  h.event({event:kind+".disconnect",deviceId:h.current.id});
+  await device.forget();
+  assert.equal(h.requests.at(-1).op,kind+".forget");
+  assert.deepEqual(Array.from(await h.api[get]()),[]);
 });

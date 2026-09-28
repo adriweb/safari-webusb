@@ -95,9 +95,13 @@
     async open() { await change(this, "hid.open"); }
     async close() { await change(this, "hid.close"); }
     async forget() {
-      // The native host revokes grants when it reports a device disconnect.
-      if (!state(this).connected) return;
-      await change(this, "hid.forget");
+      const slot = state(this);
+      if (slot.busy) throw exception("InvalidStateError", "A HID state change is already in progress.");
+      slot.busy = true;
+      try {
+        await rpc("hid.forget", {deviceId: slot.snapshot.id});
+        slot.snapshot = {...slot.snapshot, opened: false};
+      } finally { slot.busy = false; }
     }
     async sendReport(reportId, data) {
       const slot = ready(this);

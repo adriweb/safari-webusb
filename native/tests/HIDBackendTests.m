@@ -43,6 +43,12 @@ void IOHIDManagerCancel(IOHIDManagerRef manager) {
 CFSetRef IOHIDManagerCopyDevices(IOHIDManagerRef manager) { (void)manager; return (CFSetRef)CFBridgingRetain([NSSet setWithArray:inventory.allValues]); }
 io_service_t IOHIDDeviceGetService(IOHIDDeviceRef device) { return (io_service_t)Device(device).service; }
 kern_return_t IORegistryEntryGetRegistryEntryID(io_registry_entry_t entry, uint64_t *identifier) { *identifier = entry; return kIOReturnSuccess; }
+CFTypeRef IORegistryEntrySearchCFProperty(io_registry_entry_t entry, const io_name_t plane, CFStringRef key,
+                                              CFAllocatorRef allocator, IOOptionBits options) {
+    (void)plane; (void)allocator; (void)options;
+    id value = inventory[@(entry)].properties[(__bridge NSString *)key];
+    return value ? CFBridgingRetain(value) : NULL;
+}
 CFTypeRef IOHIDDeviceGetProperty(IOHIDDeviceRef device, CFStringRef key) { return (__bridge CFTypeRef)Device(device).properties[(__bridge NSString *)key]; }
 IOHIDDeviceRef IOHIDDeviceCreate(CFAllocatorRef allocator, io_service_t service) {
     (void)allocator;
@@ -105,6 +111,13 @@ static NSDictionary *Call(HIDBackend *backend, NSString *op, NSString *session, 
     [backend handleOperation:op args:args session:session completion:^(NSDictionary *r) { response = r; dispatch_semaphore_signal(sem); }];
     Check(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0, [@"request completed: " stringByAppendingString:op]);
     return response;
+}
+static NSArray *Permissions(HIDBackend *backend) {
+    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+    __block NSArray *records;
+    [backend permissionDevicesWithCompletion:^(NSArray *result) { records = result; dispatch_semaphore_signal(ready); }];
+    Check(dispatch_semaphore_wait(ready, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0, @"permission inventory completed");
+    return records;
 }
 static void Add(NSUInteger service, NSUInteger vendor, NSUInteger product, NSString *descriptor) {
     FakeHID *fake = [[FakeHID alloc] init]; fake.service = service;
@@ -211,5 +224,42 @@ int main(void) { @autoreleasepool {
     Check([events.lastObject[@"event"][@"event"] isEqual:@"hid.disconnect"], @"timeout clears page open state via disconnect");
     Check(closeCalls == 4, @"timeout closes native handle");
     pauseReports = NO;
+    [inventory removeAllObjects]; Call(backend, @"enumerate", @"a", @{});
+    Add(20, 0x03f0, 0x2441, vendorDescriptor);
+    NSDictionary *anonymous = Permissions(backend).firstObject;
+    Check([anonymous[@"durable"] isEqual:@NO], @"HID without serial uses attachment permission");
+    Check(anonymous[@"device"][@"identity"] == nil && anonymous[@"device"][@"registryID"] == nil, @"native identity stays private");
+    HIDBackend *fresh = [HIDBackend new];
+    Check([Permissions(fresh).firstObject[@"identity"] isEqual:anonymous[@"identity"]], @"same attachment retains identity across backend restart");
+    [inventory removeObjectForKey:@20]; Add(21, 0x03f0, 0x2441, vendorDescriptor);
+    Check(![Permissions(fresh).firstObject[@"identity"] isEqual:anonymous[@"identity"]], @"replugged anonymous device has distinct identity");
+    NSMutableDictionary *properties = [inventory[@21].properties mutableCopy];
+    properties[@kIOHIDSerialNumberKey] = @"HID serial"; inventory[@21].properties = properties;
+    HIDBackend *missingInterface = [HIDBackend new];
+    Check([Permissions(missingInterface).firstObject[@"durable"] isEqual:@NO], @"serial alone cannot distinguish HID interfaces");
+    properties[@"bInterfaceNumber"] = @0; inventory[@21].properties = [properties copy];
+    HIDBackend *identified = [HIDBackend new];
+    NSDictionary *durable = Permissions(identified).firstObject;
+    Check([durable[@"durable"] isEqual:@YES], @"serial and interface produce durable HID permission");
+    Check(durable[@"device"][@"serialNumber"] == nil, @"WebHID snapshots do not expose native serial");
+    [inventory removeObjectForKey:@21]; Add(22, 0x03f0, 0x2441, vendorDescriptor); inventory[@22].properties = [properties copy];
+    Check([Permissions(identified).firstObject[@"identity"] isEqual:durable[@"identity"]], @"durable HID identity survives replug");
+    Add(23, 0x03f0, 0x2441, vendorDescriptor); inventory[@23].properties = [properties copy];
+    NSArray *ambiguous = Permissions(identified);
+    Check(ambiguous.count == 2 && [ambiguous[0][@"identity"] isEqual:ambiguous[1][@"identity"]], @"duplicate identities remain visible for router ambiguity rejection");
+    [inventory removeAllObjects]; Permissions(identified);
+    properties[@"bInterfaceNumber"] = @1;
+    Add(24, 0x03f0, 0x2441, vendorDescriptor); inventory[@24].properties = [properties copy];
+    Check(![Permissions(identified).firstObject[@"identity"] isEqual:durable[@"identity"]], @"HID interfaces have separate permissions");
+    [inventory removeAllObjects]; Permissions(identified);
+    properties[@"bInterfaceNumber"] = @0;
+    properties[@kIOHIDReportDescriptorKey] = Hex([vendorDescriptor stringByReplacingOccurrencesOfString:@"95 04" withString:@"95 03"]);
+    Add(25, 0x03f0, 0x2441, vendorDescriptor); inventory[@25].properties = [properties copy];
+    Check(![Permissions(identified).firstObject[@"identity"] isEqual:durable[@"identity"]], @"descriptor changes require renewed HID consent");
+    Check([Call(identified, @"getDevices", @"new-document", @{})[@"result"] count] == 0, @"permission inventory never grants access");
+    [inventory removeAllObjects]; Add(0, 0x03f0, 0x2441, vendorDescriptor);
+    NSDictionary *unknownAttachment = Permissions(identified).firstObject;
+    HIDBackend *unknownFresh = [HIDBackend new];
+    Check(![Permissions(unknownFresh).firstObject[@"identity"] isEqual:unknownAttachment[@"identity"]], @"unknown registry attachment never matches across backend restart");
     NSLog(@"HID backend tests: %u assertions passed", checks);
 } return 0; }

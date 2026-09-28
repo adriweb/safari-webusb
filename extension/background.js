@@ -7,6 +7,8 @@
     ...["open", "close", "forget", "read", "cancelRead", "write", "drain", "abortWrite", "getSignals", "setSignals"].map(op => "serial." + op),
     ...["open", "close", "forget", "sendReport", "sendFeatureReport", "receiveFeatureReport"].map(op => "hid." + op)
   ]);
+  const LIST_OPS = new Set(["getDevices", "serial.getPorts", "hid.getDevices"]);
+  const isForget = op => op === "forget" || op.endsWith(".forget");
   const kindOf = op => op.startsWith("serial.") ? "serial" : op.startsWith("hid.") ? "hid" : "usb";
   const devicesFor = (session, kind) => kind === "usb" ? session.devices : session[kind];
   const nativeOp = (kind, op) => kind === "usb" ? op : kind + "." + op;
@@ -144,9 +146,18 @@
     const transportFactory = options.transportFactory || (config => root.SafariWebUSBTransport.createTransport(config));
     const transport = transportFactory({browser, crypto, timers, onEvent(identifier, event) {
       const session = [...sessions].find(s => s.id === identifier);
-      if (!session || session.closed || !session.instance || !event || typeof event.deviceId !== "string") return;
+      if (!session || session.closed || !event || typeof event.deviceId !== "string") return;
+      if (event.event === "permissions.revoked") {
+        if (!["usb", "serial", "hid"].includes(event.kind)) return;
+        const devices = devicesFor(session, event.kind);
+        ++session.permissionEpoch;
+        if (!session.known[event.kind].has(event.deviceId)) return;
+        session.known[event.kind].delete(event.deviceId);
+        if (devices.delete(event.deviceId)) post(session, {event: nativeOp(event.kind, "disconnect"), deviceId: event.deviceId});
+        return;
+      }
       const kind = kindOf(event.event || "");
-      if (kind === "usb") return;
+      if (!session.instance || kind === "usb") return;
       const devices = devicesFor(session, kind);
       if (!devices.has(event.deviceId)) return;
       if (event.data !== undefined && (typeof event.data !== "string" || event.data.length > Math.ceil(MAX_BYTES / 3) * 4)) return;
@@ -160,20 +171,28 @@
     }});
     const nativeScheduler = options.nativeScheduler || createNativeScheduler({timers, minimumGap: () => transport.minimumGap});
     const chooserURL = browser.runtime.getURL("chooser.html");
+    const permissionsURL = browser.runtime.getURL("permissions.html");
+    const managementSession = crypto.randomUUID();
+    // Safari's getURL() preserves UUID casing while WebKit's authenticated
+    // WebSocket Origin lowercases the host. Use the same canonical origin.
+    const managementOrigin = new URL(browser.runtime.getURL(""));
+    if (managementOrigin.protocol !== "safari-web-extension:" || !managementOrigin.hostname || managementOrigin.port || managementOrigin.username || managementOrigin.password)
+      throw fail("SecurityError", "Invalid extension origin.");
+    const extensionOrigin = `${managementOrigin.protocol}//${managementOrigin.hostname.toLowerCase()}`;
     const post = (session, message) => { if (!session.closed) { try { session.port.postMessage(message); } catch {} } };
     async function native(session, op, args = {}, expected = session.instance) {
       if (op === "serial.write" && session.aborting.has(args.deviceId)) throw fail("AbortError", "Serial output is being canceled.");
-      const queuedInstance = session.instance, sessionId = session.id, origin = session.origin, queuedEpoch = transportEpoch;
-      const run = () => transport.send({version: 1, op, session: sessionId, origin, ...(expected ? {instance: expected} : {}), args});
+      const queuedInstance = session.instance, sessionId = session.id, origin = session.origin, privateBrowsing = session.privateBrowsing, queuedEpoch = transportEpoch, permissionEpoch = session.permissionEpoch;
+      const run = () => transport.send({version: 1, op, session: sessionId, origin, privateBrowsing, ...(expected ? {instance: expected} : {}), args});
       const validate = () => {
         if (queuedEpoch !== transportEpoch) throw fail("InvalidStateError", "The USB transport disconnected before the operation started.");
         // closeSession must still release handles after its page has gone away.
         if (op !== "closeSession") {
           if (session.closed) throw fail("AbortError", "The requesting page closed before the USB operation started.");
-          if (session.instance !== queuedInstance) throw fail("InvalidStateError", "The USB document session changed before the operation started.");
-          if ((DEVICE_OPS.has(op) || PERIPHERAL_OPS.has(op)) && !devicesFor(session, kindOf(op)).has(args.deviceId)) throw fail("NotAllowedError", "This page has not been granted that USB device.");
+          if (session.instance !== queuedInstance && !(queuedInstance === null && (LIST_OPS.has(op) || session.instance === expected))) throw fail("InvalidStateError", "The USB document session changed before the operation started.");
+          if ((DEVICE_OPS.has(op) || PERIPHERAL_OPS.has(op)) && !(isForget(op) ? session.known[kindOf(op)] : devicesFor(session, kindOf(op))).has(args.deviceId)) throw fail("NotAllowedError", "This page has not been granted that USB device.");
         }
-        if (session.id !== sessionId || session.origin !== origin) throw fail("SecurityError", "The USB document session identity changed before the operation started.");
+        if (session.id !== sessionId || session.origin !== origin || session.privateBrowsing !== privateBrowsing) throw fail("SecurityError", "The USB document session identity changed before the operation started.");
         if (op === "serial.write" && session.aborting.has(args.deviceId)) throw fail("AbortError", "Serial output is being canceled.");
       };
       let response;
@@ -191,10 +210,11 @@
       } else response = await nativeScheduler.schedule(run, validate, {sessionId, op, deviceId: args.deviceId});
       if (queuedEpoch !== transportEpoch) throw fail("InvalidStateError", "The USB transport disconnected. Choose the device again.");
       if (!response || typeof response.instance !== "string" || typeof response.ok !== "boolean") throw fail("NetworkError", "Invalid response from the native USB bridge.");
-      if (expected && expected !== response.instance) {
+      if (expected && expected !== response.instance || LIST_OPS.has(op) && session.instance && session.instance !== response.instance) {
         invalidate(session);
         throw fail("InvalidStateError", "The native USB process restarted. Choose the device again.");
       }
+      if (session.permissionEpoch !== permissionEpoch && !isForget(op) && op !== "closeSession") throw fail("NotAllowedError", "Device permission changed while the operation was in progress.");
       if (!response.ok) throw fail(response.error?.name || "NetworkError", response.error?.message || "USB request failed.");
       return response;
     }
@@ -205,6 +225,8 @@
         for (const deviceId of devicesFor(session, kind).keys()) post(session, {event: kind + ".disconnect", deviceId});
         devicesFor(session, kind).clear();
       }
+      for (const known of Object.values(session.known)) known.clear();
+      ++session.permissionEpoch;
       session.instance = null;
     }
     async function finishChooser(token, deviceId, error) {
@@ -223,11 +245,10 @@
       try {
         // The chooser can outlive an idle native session. Refresh only after an
         // explicit selection, renewing the lease and rejecting stale attachments.
-        if (choice.kind !== "usb") {
-          const refreshed = await native(choice.session, nativeOp(choice.kind, "enumerate"), {}, choice.instance);
-          if (!refreshed.result.some(d => d.id === deviceId && peripheralEligible(choice.kind, d, choice.filters)))
-            throw fail("NotFoundError", "The selected device is no longer available. Choose it again.");
-        }
+        const refreshed = await native(choice.session, nativeOp(choice.kind, "enumerate"), {}, choice.instance);
+        if (!refreshed.result.some(d => d.id === deviceId && (choice.kind === "usb"
+            ? eligible(d, choice.filters) : peripheralEligible(choice.kind, d, choice.filters))))
+          throw fail("NotFoundError", "The selected device is no longer available. Choose it again.");
         const reply = await native(choice.session, nativeOp(choice.kind, "grant"), {deviceId}, choice.instance);
         // Navigation can close a port while the native grant is in flight.
         if (choice.session.closed) {
@@ -237,6 +258,7 @@
         }
         choice.session.instance = reply.instance;
         devicesFor(choice.session, choice.kind).set(deviceId, reply.result);
+        choice.session.known[choice.kind].add(deviceId);
         choice.resolve(choice.kind === "hid" ? [reply.result] : reply.result);
       } catch (error) { choice.reject(error); }
     }
@@ -264,41 +286,32 @@
     async function request(session, message) {
       validateRequest(message);
       if (["requestDevice", "serial.requestPort", "hid.requestDevice"].includes(message.op)) return choose(session, message.args, kindOf(message.op));
-      if (kindOf(message.op) !== "usb") {
-        const kind = kindOf(message.op), devices = devicesFor(session, kind);
-        if (["serial.getPorts", "hid.getDevices"].includes(message.op)) {
-          if (!session.instance || !devices.size) return [];
-          const {result} = await native(session, message.op);
-          const live = new Set(result.map(d => d.id));
-          for (const id of devices.keys()) if (!live.has(id)) { devices.delete(id); post(session, {event: kind + ".disconnect", deviceId: id}); }
-          for (const device of result) devices.set(device.id, device);
-          return result;
+      const kind = kindOf(message.op), devices = devicesFor(session, kind);
+      if (LIST_OPS.has(message.op)) {
+        const reply = await native(session, message.op);
+        if (session.closed) {
+          await native(session, "closeSession", {}, reply.instance).catch(() => {});
+          throw fail("AbortError", "The requesting page closed.");
         }
-        if (!session.instance || !devices.has(message.args.deviceId)) throw fail("NotAllowedError", "This page has not been granted that device.");
-        const {result} = await native(session, message.op, message.args);
-        if (message.op.endsWith(".forget")) devices.delete(message.args.deviceId);
-        else if (result?.id) devices.set(result.id, result);
-        return result;
+        if (!Array.isArray(reply.result)) throw fail("NetworkError", "Invalid saved-device list from the native bridge.");
+        session.instance = reply.instance;
+        const live = new Set(reply.result.map(d => d.id));
+        for (const id of devices.keys()) if (!live.has(id)) { devices.delete(id); post(session, {event: nativeOp(kind, "disconnect"), deviceId: id}); }
+        for (const device of reply.result) { devices.set(device.id, device); session.known[kind].add(device.id); }
+        return reply.result;
       }
-      if (message.op === "getDevices") {
-        if (!session.instance || !session.devices.size) return [];
-        const {result} = await native(session, "getDevices");
-        const live = new Set(result.map(d => d.id));
-        for (const id of session.devices.keys()) if (!live.has(id)) { session.devices.delete(id); post(session, {event: "disconnect", deviceId: id}); }
-        for (const device of result) session.devices.set(device.id, device);
-        return result;
-      }
-      if (!session.instance || !session.devices.has(message.args.deviceId)) throw fail("NotAllowedError", "This page has not been granted that USB device.");
+      const permitted = isForget(message.op) ? session.known[kind] : devices;
+      if (!session.instance || !permitted.has(message.args.deviceId)) throw fail("NotAllowedError", "This page has not been granted that device.");
       const {result} = await native(session, message.op, message.args);
-      if (message.op === "forget") session.devices.delete(message.args.deviceId);
-      else if (result?.id) session.devices.set(result.id, result);
+      if (isForget(message.op)) { devices.delete(message.args.deviceId); session.known[kind].delete(message.args.deviceId); }
+      else if (result?.id) devices.set(result.id, result);
       return result;
     }
     browser.runtime.onConnect.addListener(port => {
       if (port.name !== "safari-webusb-v1") { port.disconnect(); return; }
       let origin;
       try { origin = trustedOrigin(port.sender); } catch { port.disconnect(); return; }
-      const session = {port, origin, id: crypto.randomUUID(), instance: null, devices: new Map(), serial: new Map(), hid: new Map(), aborting: new Set(), closed: false, pending: new Set(), polling: false};
+      const session = {port, origin, privateBrowsing: port.sender.tab.incognito !== false, permissionEpoch: 0, known: {usb: new Set(), serial: new Set(), hid: new Set()}, id: crypto.randomUUID(), instance: null, devices: new Map(), serial: new Map(), hid: new Map(), aborting: new Set(), closed: false, pending: new Set(), polling: false};
       sessions.add(session);
       port.onMessage.addListener(async message => {
         if (session.closed || !message || typeof message.id !== "string" || session.pending.has(message.id)) return;
@@ -320,11 +333,25 @@
       if (!sender?.url || sender.id !== browser.runtime.id) return undefined;
       let url;
       try { url = new URL(sender.url); } catch { return undefined; }
+      if (url.href === permissionsURL) {
+        const privateBrowsing = sender.tab ? sender.tab.incognito !== false : browser.extension?.inIncognitoContext !== false;
+        if (privateBrowsing) return Promise.resolve({error: "Saved device permissions are unavailable in private browsing."});
+        if (!["permissions.list", "permissions.revoke", "permissions.clear"].includes(message?.op)) return undefined;
+        if (message.op === "permissions.revoke" && (typeof message.id !== "string" || !message.id.length || message.id.length > 256))
+          return Promise.resolve({error: "Invalid device permission."});
+        const args = message.op === "permissions.revoke" ? {id: message.id} : {};
+        return nativeScheduler.schedule(() => transport.send({version: 1, op: message.op, extensionManagement: true,
+          session: managementSession, origin: extensionOrigin, privateBrowsing: false, args}))
+          .then(response => {
+            if (!response || response.ok !== true) throw fail(response?.error?.name || "NetworkError", response?.error?.message || "Could not update device permissions.");
+            return {result: response.result};
+          }).catch(error => ({error: error.message}));
+      }
       if (url.href.split("?")[0] !== chooserURL) return undefined;
       const token = url.searchParams.get("token");
       const choice = choosers.get(token);
       if (!choice) return Promise.resolve({error: "This chooser has expired."});
-      if (message?.op === "chooserInfo") return Promise.resolve({origin: choice.session.origin, kind: choice.kind, devices: choice.devices});
+      if (message?.op === "chooserInfo") return Promise.resolve({origin: choice.session.origin, kind: choice.kind, privateBrowsing: choice.session.privateBrowsing, remembersPermissions: transport.supportsRememberedPermissions !== false, devices: choice.devices});
       if (message?.op === "chooserSelect") {
         return finishChooser(token, message.deviceId).then(() => ({ok: true}));
       }
@@ -334,13 +361,15 @@
     browser.windows.onRemoved.addListener(windowId => {
       for (const [token, choice] of choosers) if (choice.windowId === windowId) finishChooser(token, null, fail("NotFoundError", "No device selected."));
     });
-    // Poll only granted sessions; no device identities are broadcast to pages.
+    // Keep document grants, including detached IDs usable by forget(), alive.
+    // No device identities are broadcast to unrelated pages.
     const heartbeat = timers.setInterval(async () => {
       for (const session of sessions) {
-        if (!session.instance || !(session.devices.size + session.serial.size + session.hid.size) || session.polling) continue;
+        if (!session.instance || !Object.values(session.known).some(ids => ids.size) || session.polling) continue;
         session.polling = true;
         try {
-          for (const op of ["getDevices", "serial.getPorts", "hid.getDevices"]) await request(session, {id: "heartbeat", op});
+          if (!(session.devices.size + session.serial.size + session.hid.size)) await native(session, "heartbeat");
+          else for (const op of LIST_OPS) if (devicesFor(session, kindOf(op)).size) await request(session, {id: "heartbeat", op});
         }
         catch { invalidate(session); }
         finally { session.polling = false; }
