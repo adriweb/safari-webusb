@@ -1,0 +1,156 @@
+name: Build and release Safari WebUSB
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sign_and_notarize:
+        description: 'Create a Developer ID signed and notarized artifact (main only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safari-webusb-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      BUILD_CONFIGURATION: Release
+      BUILD_ARCHS: 'arm64 x86_64'
+      BUILD_NUMBER: ${{ github.run_number }}
+      SAFARI_WEBUSB_DEPLOYMENT_TARGET: '13.0'
+      SIGNED_BUILD: ${{ github.repository == 'adriweb/safari-webusb' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.sign_and_notarize)) }}
+    steps:
+      - name: Check out the exact source revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Validate release request
+        env:
+          REQUESTED_SIGNING: ${{ github.event_name == 'workflow_dispatch' && inputs.sign_and_notarize }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          version = json.load(open('extension/manifest.json'))['version']
+          ref = os.environ['GITHUB_REF']
+          if ref.startswith('refs/tags/') and ref != 'refs/tags/v' + version:
+              raise SystemExit('Release tag must match extension/manifest.json version: v' + version)
+          if os.environ['REQUESTED_SIGNING'] == 'true' and os.environ['SIGNED_BUILD'] != 'true':
+              raise SystemExit('Manual signing is allowed only on adriweb/safari-webusb main.')
+          PY
+      - name: Check signing secrets
+        if: github.repository == 'adriweb/safari-webusb' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.sign_and_notarize))
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_KEYCHAIN_PWD: ${{ secrets.MACOS_KEYCHAIN_PWD }}
+          MACOS_CODESIGN_IDENT: ${{ secrets.MACOS_CODESIGN_IDENT }}
+          APPLE_NOTARIZATION_USERNAME: ${{ secrets.APPLE_NOTARIZATION_USERNAME }}
+          APPLE_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
+          APPLE_NOTARIZATION_TEAMID: ${{ secrets.APPLE_NOTARIZATION_TEAMID }}
+        run: |
+          python3 - <<'PY'
+          import os
+          names = ['MACOS_CERTIFICATE', 'MACOS_CERTIFICATE_PWD', 'MACOS_KEYCHAIN_PWD',
+                   'MACOS_CODESIGN_IDENT', 'APPLE_NOTARIZATION_USERNAME',
+                   'APPLE_NOTARIZATION_PASSWORD', 'APPLE_NOTARIZATION_TEAMID']
+          missing = [name for name in names if not os.environ.get(name)]
+          if missing:
+              raise SystemExit('Configure repository signing secrets: ' + ', '.join(missing))
+          PY
+      - name: Install pkg-config
+        run: command -v pkg-config >/dev/null || brew install pkgconf
+      - name: Test JavaScript and distribution verifier
+        run: |
+          node --test tests/*.test.cjs
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Build pinned universal libusb
+        run: ./scripts/build-libusb.sh
+      - name: Test native device backends without hardware
+        env:
+          LIBUSB_PREFIX: ${{ github.workspace }}/build/deps/libusb
+        run: ./native/tests/run.sh
+      - name: Build universal app
+        run: ./scripts/build.sh
+      - name: Verify architectures, entitlements and bundled notices
+        run: python3 scripts/verify-distribution.py 'build/products/Release/Safari WebUSB.app' --build-version "$BUILD_NUMBER"
+      - name: Sign and notarize
+        if: github.repository == 'adriweb/safari-webusb' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.sign_and_notarize))
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_KEYCHAIN_PWD: ${{ secrets.MACOS_KEYCHAIN_PWD }}
+          MACOS_CODESIGN_IDENT: ${{ secrets.MACOS_CODESIGN_IDENT }}
+          APPLE_NOTARIZATION_USERNAME: ${{ secrets.APPLE_NOTARIZATION_USERNAME }}
+          APPLE_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
+          APPLE_NOTARIZATION_TEAMID: ${{ secrets.APPLE_NOTARIZATION_TEAMID }}
+        run: ./scripts/sign-and-notarize.sh
+      - name: Package app with matching source and checksums
+        env:
+          SIGNED_BUILD: ${{ github.repository == 'adriweb/safari-webusb' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.sign_and_notarize)) }}
+        run: |
+          mkdir -p build/dist
+          version=$(python3 -c 'import json; print(json.load(open("extension/manifest.json"))["version"])')
+          if [[ "$SIGNED_BUILD" == true ]]; then
+            archive="Safari-WebUSB-v${version}-universal.zip"
+          else
+            archive="Safari-WebUSB-development-${GITHUB_SHA:0:12}-universal.zip"
+          fi
+          ditto -c -k --keepParent 'build/products/Release/Safari WebUSB.app' "build/dist/$archive"
+          source_archive=$(./scripts/package-source.sh)
+          cp "$source_archive" build/dist/
+          (cd build/dist && shasum -a 256 ./*.zip ./*.tar.gz > SHA256SUMS)
+      - name: Upload complete distribution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Safari-WebUSB-${{ github.sha }}
+          path: build/dist/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.repository == 'adriweb/safari-webusb' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download the signed distribution
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: Safari-WebUSB-${{ github.sha }}
+          path: distribution
+      - name: Verify checksums
+        working-directory: distribution
+        run: sha256sum --check SHA256SUMS
+      - name: Publish experimental release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          Experimental WebUSB, WebSerial and WebHID support for Safari 18+ on macOS 13+, for Intel and Apple Silicon.
+
+          The app is Developer ID signed, notarized, and stapled. Enable its extension in Safari settings and grant access to your test site. Keep Safari WebUSB running while using USB devices; closing its window is fine. After quitting the app, reopen it, reload the website, and choose the device again.
+
+          Download the matching source archive for the application and exact libusb source, generated Xcode project, and rebuilding/relinking instructions. License notices are also embedded in the app. SHA256SUMS covers both downloads.
+
+          This is a prototype: page-scoped grants, serialized USB transfers, and native-process lifetime limits apply. Calculator transfers still require device-specific validation. Isochronous USB transfers and Bluetooth serial service selection are unsupported. Serial and HID require the signed app and still need physical-device validation. See the repository README for details.
+          EOF
+          gh release create "$RELEASE_TAG" distribution/* --repo "$GH_REPO" --verify-tag \
+            --title "Safari WebUSB $RELEASE_TAG" --notes-file release-notes.md --prerelease

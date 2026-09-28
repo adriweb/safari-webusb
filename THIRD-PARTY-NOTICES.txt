@@ -8,9 +8,14 @@ licensed under the GNU Lesser General Public License, version 2.1 or later.
 The libusb license is included as LICENSES/libusb-LGPL-2.1.txt.
 libusb project: https://libusb.info/ and https://github.com/libusb/libusb
 
+Each binary download is accompanied by a matching Safari-WebUSB-source archive.
+That archive includes this application's source, the exact libusb source archive,
+generated Xcode project sources, and instructions for building and relinking with
+a modified libusb. See SOURCE-BUNDLE-README.md in that archive.
+
 Project source and releases: https://github.com/adriweb/safari-webusb
 Dependency version and source checksum: dependencies/libusb.json in the source.
 
 The project was inspired by ArcaneNibble/awawausb. No awawausb code is included.
 The build uses Apple's Safari Web Extension converter to generate the containing
-app wrapper. Preserve those generated sources when distributing relinking materials.
+app wrapper. Those generated sources are included in the matching source bundle.

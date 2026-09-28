@@ -57,8 +57,8 @@ needed. Safari 18 or later is still required even on a compatible macOS.
 `BUILD_CONFIGURATION=Debug` selects the Debug configuration. `BUILD_ARCHS="arm64"`
 or `BUILD_ARCHS="x86_64"` limits the app to one architecture; the dependency
 helper always builds its universal archive. The default is
-`BUILD_ARCHS="arm64 x86_64"`. Set `LIBUSB_SOURCE_DIR` to a prepared libusb
-source directory to build against a modified library.
+`BUILD_ARCHS="arm64 x86_64"`. See [relinking](docs/DISTRIBUTION.md#rebuild-and-relink)
+for the `LIBUSB_SOURCE_DIR` override used to test a modified library.
 
 Run the app, then enable **Safari WebUSB** in Safari > Settings > Extensions.
 Keep the app running while using USB; closing its window leaves the bridge
@@ -69,8 +69,8 @@ features for web developers, then Allow Unsigned Extensions in Safari's
 developer options. Safari resets that setting when it quits. To use an Apple
 development identity, open the generated Xcode project and select your team,
 or run `TEAM_ID=YOUR_TEAM_ID ./scripts/build.sh`. Development signing is for
-local development; public downloads require a Developer ID Application
-certificate and notarization.
+local development; public downloads use a Developer ID Application certificate
+and notarization as described in [Distribution](docs/DISTRIBUTION.md).
 
 Grant the extension access to the test website. Reload the page after granting
 access so that the API is injected before the website's scripts execute.
@@ -80,8 +80,8 @@ provide the native USB backend; the containing app is required.
 Both targets use App Sandbox and the USB entitlement. The companion app also
 has the serial-device and network-server entitlements and binds only to IPv4 loopback, on a random
 port. Signed builds share a team-prefixed macOS app-group container for private
-bootstrap credentials. `TEAM_ID` supplies the group prefix when configuring
-the project; no additional provisioning profile is needed for this macOS group format.
+bootstrap credentials. Release signing derives the group from the signing
+team; no additional provisioning profile is needed for this macOS group format.
 Ad-hoc builds cannot authenticate access to that shared container and use the
 slower native-message fallback for WebUSB only. WebSerial and WebHID require
 the signed app group and persistent socket; ad-hoc installations report
@@ -280,7 +280,7 @@ Firefox's long-lived stdio host mechanism.
   This remains prototype code, not a reviewed security boundary for arbitrary
   websites or sensitive USB devices.
 
-## Tests
+## Tests and CI
 
 ```sh
 node --test tests/*.test.cjs
@@ -303,6 +303,19 @@ in a signed app sandbox with the USB entitlement. It prints device metadata
 Running a sandboxed executable outside an app bundle can fail in macOS's
 `libsecinit`, which is why this diagnostic creates its own small `.app` bundle.
 
+GitHub Actions builds a universal Release app using the pinned static libusb,
+runs automated checks, and uploads app and source archives. Pushes to `main`
+and pull requests produce ad-hoc development artifacts. A `v*` tag requires
+Developer ID signing and notarization before creating a GitHub release. Manual
+runs are unsigned unless `sign_and_notarize` is enabled; a signed manual run
+uploads artifacts without publishing a release.
+
+The signed path requires the seven Apple signing/notarization secrets listed
+in [Distribution](docs/DISTRIBUTION.md). They must be configured for this
+repository; GitHub does not make another repository's encrypted secret values
+available for copying. CI validates packaging and code signatures, not USB
+operation inside Safari or physical calculator transfers.
+
 ## License and acknowledgments
 
 Copyright (C) 2026 Adrien Bertrand. This project is licensed under the
@@ -318,10 +331,18 @@ those pieces cannot be used unchanged in Safari.
 The implementation here is original; no awawausb code is copied. Its upstream
 [license](https://github.com/ArcaneNibble/awawausb/blob/main/LICENSE) is a
 permissive ISC-style grant with the author's copyright notice. libusb is an
-independent LGPL-2.1-or-later dependency. The app embeds
+independent LGPL-2.1-or-later dependency. CI app archives include
 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), the project license, and the
-libusb license. Distributing statically linked binaries also requires matching
-source and relinking materials for a modified libusb.
+libusb license; corresponding source archives accompany the binaries.
+These contain the exact project revision and pinned libusb source, with the
+[rebuild and relinking instructions](docs/DISTRIBUTION.md#rebuild-and-relink)
+needed to build against a modified library.
+
+The macOS signing sequence and credential names are informed by
+[CEmu's workflow at `54f4a9a`](https://github.com/CE-Programming/CEmu/blob/54f4a9a4eb9e1c89a7c405705b1a1fc1ab428da2/.github/workflows/build.mac.workflow.yml).
+This project's workflow is independently written. It signs the Safari extension
+and containing app with separate entitlements and distributes a ZIP rather
+than CEmu's DMG.
 
 ## Sources
 
