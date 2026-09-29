@@ -39,6 +39,9 @@ if os.environ.get("FAKE_FAIL") == name + ":" + args[0]:
     sys.exit(42)
 if name == "security" and args[0] == "create-keychain":
     pathlib.Path(args[-1]).write_text("dummy keychain")
+elif name == "security" and args[0] == "list-keychains" and "-s" not in args:
+    print('    "/Users/runner/Library/Keychains/login.keychain-db"')
+    print('    "/Library/Keychains/System.keychain"')
 elif name == "ditto":
     pathlib.Path(args[-1]).write_bytes(b"dummy ZIP")
 elif name == "xcrun" and args[:2] == ["notarytool", "submit"]:
@@ -112,6 +115,11 @@ class SigningTests(unittest.TestCase):
         self.assertEqual(list(self.runner_temp.iterdir()), [], "Temporary certificate/keychain files survived")
         self.assertEqual(records[-1]["command"], "security")
         self.assertEqual(records[-1]["args"][0], "delete-keychain")
+        changes = [record["args"] for record in records
+                   if record["command"] == "security" and record["args"][:4] == ["list-keychains", "-d", "user", "-s"]]
+        if changes:
+            self.assertEqual(changes[-1][4:], ["/Users/runner/Library/Keychains/login.keychain-db",
+                                               "/Library/Keychains/System.keychain"])
         for path, original in self.original_entitlements.items():
             self.assertEqual(path.read_bytes(), original, "Signing mutated the generated entitlement file")
 
@@ -127,7 +135,13 @@ class SigningTests(unittest.TestCase):
     def test_accepted_release_signs_inside_out_with_distinct_original_entitlements(self):
         result, records = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
+        registration = next(record for record in records if record["command"] == "security"
+                            and record["args"][:4] == ["list-keychains", "-d", "user", "-s"])
         signatures = [record for record in records if record["command"] == "codesign"]
+        self.assertLess(records.index(registration), records.index(signatures[0]))
+        self.assertEqual(registration["args"][4], signatures[0]["args"][signatures[0]["args"].index("--keychain") + 1])
+        self.assertEqual(registration["args"][5:], ["/Users/runner/Library/Keychains/login.keychain-db",
+                                                   "/Library/Keychains/System.keychain"])
         self.assertEqual(len(signatures), 2)
         self.assertEqual(signatures[0]["args"][-1], str(self.extension))
         self.assertEqual(signatures[1]["args"][-1], str(self.app))

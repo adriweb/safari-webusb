@@ -26,7 +26,15 @@ fi
 test -d "$app/Contents/PlugIns/Safari WebUSB Extension.appex"
 temporary=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/safari-webusb-sign.XXXXXX")
 keychain="$temporary/signing.keychain-db"
+restore_search_list=false
 cleanup() {
+  if [[ "$restore_search_list" == true ]]; then
+    python3 - "$temporary/keychains.txt" <<'RESTORE' || true
+import pathlib, shlex, subprocess, sys
+original = shlex.split(pathlib.Path(sys.argv[1]).read_text())
+subprocess.run(["security", "list-keychains", "-d", "user", "-s", *original], check=True)
+RESTORE
+  fi
   security delete-keychain "$keychain" >/dev/null 2>&1 || true
   rm -rf "$temporary"
 }
@@ -45,11 +53,24 @@ progress "Configuring temporary signing keychain"
 security set-keychain-settings -lut 21600 "$keychain"
 progress "Unlocking temporary signing keychain"
 security unlock-keychain -p "$MACOS_KEYCHAIN_PWD" "$keychain"
+# codesign's --keychain limits certificate lookup, but private-key lookup also
+# needs the keychain in the user search list. Keep the existing trust keychains.
+progress "Registering temporary signing keychain"
+security list-keychains -d user > "$temporary/keychains.txt"
+restore_search_list=true
+python3 - "$temporary/keychains.txt" "$keychain" <<'REGISTER'
+import pathlib, shlex, subprocess, sys
+original = shlex.split(pathlib.Path(sys.argv[1]).read_text())
+subprocess.run(["security", "list-keychains", "-d", "user", "-s", sys.argv[2], *original], check=True)
+REGISTER
 progress "Importing signing certificate and private key"
 security import "$temporary/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PWD" \
   -T /usr/bin/codesign -T /usr/bin/security >/dev/null
 progress "Authorizing signing-key access"
-security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_KEYCHAIN_PWD" "$keychain" >/dev/null
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_KEYCHAIN_PWD" "$keychain" >/dev/null
+
+progress "Checking imported code-signing identities"
+security find-identity -v -p codesigning "$keychain"
 
 # The universal CI build is ad-hoc signed. Add the release team's macOS
 # app-group entitlement to copies, without mutating generated build inputs.
