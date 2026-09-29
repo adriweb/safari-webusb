@@ -4,6 +4,12 @@
 set -euo pipefail
 set +x
 umask 077
+stage="initialization"
+trap 'status=$?; printf "Signing failed during: %s (exit %s)\n" "$stage" "$status" >&2; exit "$status"' ERR
+progress() {
+  stage="$1"
+  printf '%s\n' "$stage"
+}
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root"
 app="${1:-$project_root/build/products/Release/Safari WebUSB.app}"
@@ -33,11 +39,16 @@ import base64, os, pathlib, sys
 certificate = ''.join(os.environ['MACOS_CERTIFICATE'].split())
 pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(certificate, validate=True))
 PY
+progress "Creating temporary signing keychain"
 security create-keychain -p "$MACOS_KEYCHAIN_PWD" "$keychain"
+progress "Configuring temporary signing keychain"
 security set-keychain-settings -lut 21600 "$keychain"
+progress "Unlocking temporary signing keychain"
 security unlock-keychain -p "$MACOS_KEYCHAIN_PWD" "$keychain"
+progress "Importing signing certificate and private key"
 security import "$temporary/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PWD" \
   -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+progress "Authorizing signing-key access"
 security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_KEYCHAIN_PWD" "$keychain" >/dev/null
 
 # The universal CI build is ad-hoc signed. Add the release team's macOS
@@ -53,17 +64,23 @@ for name in ('Extension', 'App'):
     entitlements['com.apple.security.application-groups'] = [team + '.org.webtilp.safariwebusb']
     (pathlib.Path(sys.argv[1]) / source.name).write_bytes(plistlib.dumps(entitlements))
 PY
+progress "Signing embedded extension"
 codesign --force --sign "$MACOS_CODESIGN_IDENT" --keychain "$keychain" --timestamp --options runtime \
   --generate-entitlement-der --entitlements "$temporary/Extension.entitlements" \
   "$app/Contents/PlugIns/Safari WebUSB Extension.appex"
+progress "Signing containing app"
 codesign --force --sign "$MACOS_CODESIGN_IDENT" --keychain "$keychain" --timestamp --options runtime \
   --generate-entitlement-der --entitlements "$temporary/App.entitlements" "$app"
+progress "Verifying signed distribution"
 python3 scripts/verify-distribution.py "$app" --release
 
+progress "Validating notarization credentials"
 xcrun notarytool store-credentials safari-webusb --keychain "$keychain" \
   --apple-id "$APPLE_NOTARIZATION_USERNAME" --password "$APPLE_NOTARIZATION_PASSWORD" \
   --team-id "$APPLE_NOTARIZATION_TEAMID" >/dev/null
+progress "Packaging notarization submission"
 ditto -c -k --keepParent "$app" "$temporary/notarization.zip"
+progress "Submitting app for notarization"
 if ! xcrun notarytool submit "$temporary/notarization.zip" --keychain-profile safari-webusb \
   --keychain "$keychain" --wait --timeout 20m --output-format json > "$temporary/result.json"; then
   echo 'Notarization submission did not complete.' >&2
@@ -78,6 +95,8 @@ if [[ "$status" != Accepted ]]; then
   cat "$temporary/notarization-log.json" >&2
   exit 1
 fi
+progress "Stapling notarization ticket"
 xcrun stapler staple "$app"
+progress "Verifying signed distribution"
 python3 scripts/verify-distribution.py "$app" --release --notarized
 echo 'Developer ID signing, notarization and stapling succeeded.'

@@ -177,6 +177,16 @@ class SigningTests(unittest.TestCase):
         self.assertFalse(any(record["command"] == "codesign" for record in records))
         self.assert_cleaned(records)
 
+    def test_keychain_failure_reports_stage_without_exposing_secrets(self):
+        result, records = self.run_script({"FAKE_FAIL": "security:set-key-partition-list"})
+        self.assertEqual(result.returncode, 42)
+        self.assertIn("Signing failed during: Authorizing signing-key access", result.stderr)
+        for name in ("MACOS_CERTIFICATE", "MACOS_CERTIFICATE_PWD", "MACOS_KEYCHAIN_PWD",
+                     "APPLE_NOTARIZATION_PASSWORD"):
+            self.assertNotIn(SECRETS[name], result.stdout + result.stderr)
+        self.assertFalse(any(record["command"] == "codesign" for record in records))
+        self.assert_cleaned(records)
+
     def test_signature_verification_failure_prevents_notarization_and_cleans_up(self):
         result, records = self.run_script({"FAKE_VERIFY_FAIL": "release"})
         self.assertEqual(result.returncode, 42)
